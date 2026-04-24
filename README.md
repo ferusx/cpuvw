@@ -35,7 +35,9 @@ Unlike traditional tools such as `top` or `htop`, CPUVw aims to:
 ## Usage
 
 ```bash
+python cpuvw.py
 python cpuvw.py --analyze
+python cpuvw.py --color
 ```
 
 ## Notes
