@@ -1,0 +1,19 @@
+# PyCharm / IDE
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+
+# Virtual environments
+venv/
+.env/

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="e584e30e-8b6f-4916-a915-a1b184ea0d19" name="SSH Interpreter → FreeBSD (Nosferatu)">
+        <fileTransfer rootFolder="/home/ferusx" accessType="SFTP" host="192.168.1.51" port="22" sshConfigId="213d521d-c5c2-470f-bdb7-c4101575732e" sshConfig="ferusx@192.168.1.51:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
