@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Markus Johnsson
 
+# Local imports
 from typing import List
 from models import ProcessInfo
+from utils import is_hidden_process
 
 # =========================================================
 # Class: ProcessFilter
@@ -21,6 +23,7 @@ class ProcessFilter:
     This stage operates on already fetched data and does not modify
     the original list structure beyond filtering.
     """
+
 
     # --------------------------------------------------------------------
     # Method: apply
@@ -48,12 +51,21 @@ class ProcessFilter:
 
         result = processes
 
+        # ------------------------------------------
+        # HIDE SYSTEM / IDLE PROCESSES
+        # ------------------------------------------
+        if not getattr(args, "all", False):
+
+            # --number overrides filtering completely
+            if getattr(args, "number", None) is None:
+                result = [p for p in result if not is_hidden_process(p)]
+
         # User
         if args.user:
             result = [p for p in result if p.user == args.user]
 
         # PID
-        if getattr(args, "user", None):
+        if getattr(args, "pid", None):
             result = [p for p in result if p.pid == args.pid]
 
         # Filter
@@ -97,16 +109,16 @@ class ProcessSorter:
 
         key_map = {
             "cpu": lambda p: p.cpu,
-            "mem": lambda p: p.mem,
+            "user": lambda p: p.user.lower(),
             "pid": lambda p: p.pid,
             "thr": lambda p: p.threads,
-            "cmd": lambda p: (p.command or "").lower(),
+            "cmd": lambda p: (p.comm or "").lower(),
         }
 
         key_func = key_map.get(args.sort, key_map["cpu"])
 
         # Default descending except for cmd
-        if args.sort == "cmd":
+        if args.sort in ("cmd", "user"):
             reverse = False
         else:
             reverse = True

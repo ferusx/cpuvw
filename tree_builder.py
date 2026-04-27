@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Markus Johnsson
 
+from collections import defaultdict
+
 
 # =========================================================
 # Class: ProcessTreeBuilder
@@ -42,25 +44,25 @@ class ProcessTreeBuilder:
             - Handles orphaned processes (missing parent)
         """
 
-        children = {}
-        lookup = {}
+        children = defaultdict(list)
+        pid_map = {}
 
-        # Build PID → Process lookup for fast parent checks
+        # Build PID lookup
         for p in processes:
-            lookup[p.pid] = p
-            children.setdefault(p.pid, [])
+            pid_map[p.pid] = p
 
         # Build parent → children mapping
         for p in processes:
-            children.setdefault(p.ppid, [])
-            children[p.ppid].append(p)
+            if p.ppid in pid_map:
+                children[p.ppid].append(p)
 
-        # Identify root processes (no valid parent)
-        roots = []
+        # Roots = processes whose parent is NOT in dataset
+        # Identify roots safely
+        roots = [p for p in processes if p.pid == 1]
 
-        for p in processes:
-            if p.ppid == 0 or p.ppid == 1 or p.ppid not in lookup:
-                roots.append(p)
+        # Fallback: if init not present (e.g. sliced dataset)
+        if not roots:
+            roots = processes
 
         return roots, children
 

@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Markus Johnsson
 
+import shutil
+import textwrap
 
 from typing import List
 from constants import (
@@ -12,7 +14,7 @@ from constants import (
 )
 # Local imports
 from models import ProcessInfo
-from utils import visible_len
+from utils import visible_len, is_hidden_process
 
 # =========================================================
 # Class: ProcessFormatter
@@ -56,7 +58,6 @@ class ProcessFormatter:
     def format(
             processes: List[ProcessInfo],
             use_color: bool,
-            use_light_color:bool,
             invert_headers:str,
             args
     ) -> List[str]:
@@ -98,9 +99,6 @@ class ProcessFormatter:
             use_color (bool):
                 Whether ANSI color styling should be applied.
 
-            use_light_color (bool):
-                Whether a more light color styling should be applied.
-
             args:
                 Parsed CLI arguments controlling formatting behavior.
 
@@ -120,6 +118,13 @@ class ProcessFormatter:
               --line-wrap is enabled.
         """
 
+        term_width = shutil.get_terminal_size((120, 20)).columns
+
+        cmd_start = PID_W + USER_W + STAT_W + CPU_W + TOT_W + THR_W
+        cmd_width = term_width - cmd_start
+
+        if cmd_width < 10:
+            cmd_width = 10
 
         lines = []
         # Fallback ensures sane width in non-interactive environments (e.g. pipes/SSH)
@@ -175,16 +180,10 @@ class ProcessFormatter:
                 if width:
                     padded = name.ljust(width)
 
-                    if use_color:
-                        parts.append(f"{padded}")
-                    else:
-                        parts.append(padded)
+                    parts.append(padded)
                 else:
                     # COMMAND column (no fixed width)
-                    if use_color:
-                        parts.append(f"{name}")
-                    else:
-                        parts.append(name)
+                    parts.append(name)
 
             header = "".join(parts)
 
@@ -201,12 +200,11 @@ class ProcessFormatter:
                     CMD_W
             )
 
-            if use_light_color:
+            # Use color theme
+            if use_color:
                 lines.append(f"{fg(0x777777)}-{RESET}" * visible_len(header))
             else:
                 lines.append("-" * visible_len(header))
-
-        processes = processes[:args.number]
 
         # Handle empty process list (IDLE view)
         if not processes:
@@ -230,9 +228,6 @@ class ProcessFormatter:
 
             total = getattr(p, "total_cpu", p.cpu)
 
-            if not args.all:
-                if cmd == "idle":
-                    continue
 
             # Hide internal ps command used for fetch
             cmd = p.command.lower()
@@ -256,35 +251,44 @@ class ProcessFormatter:
             tot_str = f"{total:<{TOT_W}.1f}"
             thr_str = f"{p.threads:<{THR_W}}"
 
+            # ------------------------------------------
+            # COMMAND FIELD (FINAL, STABLE)
+            # ------------------------------------------
+            cmd_val = (p.command or "").strip("[] ").strip() if args.show_path else (p.comm or "").strip("[] ").strip()
 
-            if args.show_path:
-                cmd_val = (p.command or "").strip("[]")
+            wrapped_lines = []
+
+            # calculate available width for command column
+            term_width = shutil.get_terminal_size((120, 20)).columns
+            cmd_start = PID_W + USER_W + STAT_W + CPU_W + TOT_W + THR_W
+            cmd_width = term_width - cmd_start
+
+            if cmd_width < 10:
+                cmd_width = 10
+
+            # ------------------------------------------
+            # NO WRAP (default + show-path)
+            # ------------------------------------------
+            if not getattr(args, "line_wrap", False):
+                cmd_str = f"{cmd_val[:cmd_width]:<{cmd_width}}"
+
+            # ------------------------------------------
+            # WRAP MODE
+            # ------------------------------------------
             else:
-                cmd_val = (p.comm or "").strip("[]")
+                chunks = [
+                    cmd_val[i:i + cmd_width]
+                    for i in range(0, len(cmd_val), cmd_width)
+                ]
 
-            cmd_str = f"{cmd_val:<{CMD_W}}"
+                if chunks:
+                    cmd_str = f"{chunks[0]:<{cmd_width}}"
+                    wrapped_lines = chunks[1:]
+                else:
+                    cmd_str = " " * cmd_width
 
             # Apply colors AFTER padding to preserve column alignment
             if use_color:
-
-                pid_str = f"{fg(0x00ffff)}{pid_str}{RESET}"
-                user_str = f"{fg(0xffffff)}{user_str}{RESET}"
-                stat_str = f"{fg(0x888888)}{stat_str}{RESET}"  # Gray
-
-                # CPU special logic (override base gray)
-                if p.cpu >= 70:
-                    cpu_str = f"{fg(0xff0000)}{cpu_str}{RESET}"  # Red
-                elif p.cpu >= 40:
-                    cpu_str = f"{fg(0xecbb00)}{cpu_str}{RESET}"  # Orange
-                elif p.cpu >= 10:
-                    cpu_str = f"{fg(0x00bf00)}{cpu_str}{RESET}"  # Green
-                else:
-                    cpu_str = f"{fg(0x888888)}{cpu_str}{RESET}"  # Gray
-
-                thr_str = f"{fg(0xffffff)}{thr_str}{RESET}"
-                cmd_str = f"{fg(0x009400)}{cmd_str}{RESET}"  # Green
-
-            elif use_light_color:
 
                 pid_str = f"{pid_str}"
                 user_str = f"{fg(0xffffff)}{user_str}{RESET}"
@@ -314,6 +318,42 @@ class ProcessFormatter:
                 f"{cmd_str}"
             )
 
+            # ------------------------------------------
+            # HARD CUT using visible width (ANSI-safe)
+            # ------------------------------------------
+            if not getattr(args, "line_wrap", False):
+
+                cut = ""
+                visible = 0
+
+                for ch in line:
+                    cut += ch
+
+                    # skip ANSI sequences
+                    if ch == "\x1b":
+                        continue
+
+                    visible = visible_len(cut)
+
+                    if visible >= term_width:
+                        break
+
+                line = cut
+
             lines.append(line)
 
+            # ------------------------------------------
+            # SAFE WRAP (NO EMPTY LINES EVER)
+            # ------------------------------------------
+            # ------------------------------------------
+            # SAFE WRAP (FIXED)
+            # ------------------------------------------
+            if args.show_path and getattr(args, "line_wrap", False):
+
+                indent = " " * (PID_W + USER_W + STAT_W + CPU_W + TOT_W + THR_W)
+
+                for chunk in wrapped_lines:
+                    lines.append(f"{indent}{chunk}")
+
         return lines
+

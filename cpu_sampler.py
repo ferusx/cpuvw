@@ -1,7 +1,11 @@
-# cpu_sampler.py (FreeBSD correct approach)
+# cpu_sampler.py
+
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Markus Johnsson
 
 import ctypes
 import ctypes.util
+import subprocess
 
 
 class CPUSampler:
@@ -43,9 +47,6 @@ class CPUSampler:
 
     def sample(self):
         result = {}
-
-        # ⚠️ Use procstat CLI instead of struct guessing
-        import subprocess
 
         try:
             output = subprocess.check_output(["ps", "-axo", "pid,%cpu"], text=True)

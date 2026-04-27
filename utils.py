@@ -6,6 +6,8 @@
 from datetime import datetime
 import re
 import json
+import time
+import subprocess
 from typing import Optional
 
 # Local imports
@@ -684,3 +686,201 @@ def describe_stats(stat_chars):
             lines.append(f"{ch} → {meaning}")
 
     return lines
+
+# -------------------------------------------------------------------------------------
+# Function: get_cpu_count
+# -------------------------------------------------------------------------------------
+def get_cpu_count():
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.ncpu"],
+            capture_output=True,
+            text=True
+        )
+        return int(result.stdout.strip())
+    except:
+        return 1
+
+# -------------------------------------------------------------------------------------
+# Function: estimate_active_cores
+# -------------------------------------------------------------------------------------
+def estimate_active_cores(processes):
+    """
+    Estimate how many cores are actively saturated based on process CPU usage.
+    """
+
+    total_cpu = sum(p.cpu for p in processes)
+
+    # Each 100% ≈ 1 core
+    active_cores = total_cpu / 100.0
+
+    return active_cores
+
+# -------------------------------------------------------------------------------------
+# Function: read_cp_times
+# -------------------------------------------------------------------------------------
+def read_cp_times():
+    result = subprocess.run(
+        ["sysctl", "-n", "kern.cp_times"],
+        capture_output=True,
+        text=True
+    )
+
+    values = list(map(int, result.stdout.strip().split()))
+
+    # FreeBSD: 5 values per core
+    cores = []
+    for i in range(0, len(values), 5):
+        cores.append(values[i:i + 5])
+
+    return cores
+
+# -------------------------------------------------------------------------------------
+# Function: get_per_core_usage
+# -------------------------------------------------------------------------------------
+def get_per_core_usage():
+    def read_cp_times():
+        result = subprocess.run(
+            ["sysctl", "-n", "kern.cp_times"],
+            capture_output=True,
+            text=True
+        )
+
+        values = list(map(int, result.stdout.strip().split()))
+
+        # FreeBSD: 5 values per core
+        cores = []
+        for i in range(0, len(values), 5):
+            cores.append(values[i:i + 5])
+
+        return cores
+
+    t1 = read_cp_times()
+    time.sleep(1.0)
+    t2 = read_cp_times()
+
+    core_usages = []
+
+    for c1, c2 in zip(t1, t2):
+        delta = [b - a for a, b in zip(c1, c2)]
+        total = sum(delta)
+
+        if total == 0:
+            usage = 0.0
+        else:
+            idle = delta[4]
+            usage = (1 - idle / total) * 100
+
+        # SAFE CLAMP (always after assignment)
+        usage = max(0.0, min(usage, 100.0))
+
+        core_usages.append(usage)
+
+    return core_usages
+
+# -------------------------------------------------------------------------------------
+# Function: classify_cores
+# -------------------------------------------------------------------------------------
+def classify_cores(usages):
+    saturated = sum(1 for u in usages if u >= 80)
+    active = sum(1 for u in usages if 40 <= u < 80)
+    idle = sum(1 for u in usages if u < 40)
+
+    return saturated, active, idle
+
+
+# -------------------------------------------------------------------------------------
+# Function: print_tree
+# -------------------------------------------------------------------------------------
+def print_tree(nodes, indent=""):
+    for node in nodes:
+        print(f"{indent}{node['comm']} ({node['pid']}) [{node['cpu']:.1f}%]")
+
+        if node["children"]:
+            print_tree(node["children"], indent + "    ")
+
+
+# -------------------------------------------------------------------------------------
+# Function: is_hidden_process
+# -------------------------------------------------------------------------------------
+def is_hidden_process(p):
+    cmd = (p.comm or "").lower()
+
+    return (
+            cmd == "idle"
+            or cmd.startswith("[") and "idle" in cmd
+            or p.cpu < 0.1
+    )
+
+def expand_with_parents(processes, all_processes):
+    pid_map = {p.pid: p for p in all_processes}
+    expanded = {p.pid for p in processes}
+
+    for p in processes:
+        current = p
+        while current.ppid in pid_map:
+            parent = pid_map[current.ppid]
+            if parent.pid in expanded:
+                break
+            expanded.add(parent.pid)
+            current = parent
+
+    return expanded
+
+# -------------------------------------------------------------------------------------
+# Function: get_per_core_usage_avg
+# -------------------------------------------------------------------------------------
+def get_per_core_usage_avg(duration=2.0, interval=0.3):
+    start = time.time()
+
+    prev = read_cp_times()
+    samples = []
+
+    while time.time() - start < duration:
+        time.sleep(interval)
+        curr = read_cp_times()
+
+        core_sample = []
+
+        for c1, c2 in zip(prev, curr):
+            delta = [b - a for a, b in zip(c1, c2)]
+            total = sum(delta)
+
+            if total == 0:
+                usage = 0.0
+            else:
+                idle = delta[4]
+                usage = (1 - idle / total) * 100
+
+            usage = max(0.0, min(usage, 100.0))
+            core_sample.append(usage)
+
+        samples.append(core_sample)
+        prev = curr  # 🔥 CRITICAL
+
+    # average per core
+    return [
+        sum(sample[i] for sample in samples) / len(samples)
+        for i in range(len(samples[0]))
+    ]
+
+# -------------------------------------------------------------------------------------
+# Function: compute_usage
+# -------------------------------------------------------------------------------------
+def compute_usage(prev, curr):
+    core_usages = []
+
+    for c1, c2 in zip(prev, curr):
+        delta = [b - a for a, b in zip(c1, c2)]
+        total = sum(delta)
+
+        if total == 0:
+            usage = 0.0
+        else:
+            idle = delta[4]
+            usage = (1 - idle / total) * 100
+
+        usage = max(0.0, min(usage, 100.0))
+        core_usages.append(usage)
+
+    return core_usages
