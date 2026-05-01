@@ -68,13 +68,34 @@ class ProcessFilter:
         if getattr(args, "pid", None):
             result = [p for p in result if p.pid == args.pid]
 
-        # Filter
-        if getattr(args, "filter", None):
+        # --filter-command
+        if getattr(args, "filter_command", None):
+            needle = args.filter_command.lower()
             result = [
                 p for p in result
-                if args.filter.lower() in p.command.lower()
+                if needle in (p.command or "").lower()
             ]
 
+        # --filter-user
+        if getattr(args, "filter_user", None):
+            result = [p for p in result if p.user == args.filter_user]
+
+        # Filter by STAT flags (case-insensitive, multi-character safe)
+        if getattr(args, "filter_stat", None):
+            needle = args.filter_stat.lower()
+
+            result = [
+                p for p in result
+                if all(ch in (p.stat or "").lower() for ch in needle)
+            ]
+
+        # --filter-pid
+        if getattr(args, "filter_pid", None):
+            result = [p for p in result if p.pid == args.filter_pid]
+
+        # --filter-cpu
+        if getattr(args, "filter_cpu", None):
+            result = [p for p in result if p.cpu >= args.filter_cpu]
 
         return result
 
@@ -110,6 +131,7 @@ class ProcessSorter:
         key_map = {
             "cpu": lambda p: p.cpu,
             "user": lambda p: p.user.lower(),
+            "stat": lambda p: p.stat,
             "pid": lambda p: p.pid,
             "thr": lambda p: p.threads,
             "cmd": lambda p: (p.comm or "").lower(),
@@ -127,4 +149,5 @@ class ProcessSorter:
         if getattr(args, "bottom", False):
             reverse = not reverse
 
-        return sorted(processes, key=key_func, reverse=reverse)
+        processes = sorted(processes, key=key_func, reverse=reverse)
+        return processes

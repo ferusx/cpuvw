@@ -142,6 +142,7 @@ class ProcessFormatter:
 
         # Inverted colors for the column headers
         INVERT_HEADER_COLORS = {
+            "default": (0x000000, 0xffffff),
             "white": (0xffffff, 0x000000),
             "gray": (0xaaaaaa, 0x000000),
             "blue": (0x5287d6, 0x000000),
@@ -224,13 +225,9 @@ class ProcessFormatter:
         for p in processes:
 
             # Filter out the idle kernel process unless explicitly requested
-            cmd = p.command.strip().lower()
+            cmd = p.command.strip().lower() if args.show_path else p.comm
 
             total = getattr(p, "total_cpu", p.cpu)
-
-
-            # Hide internal ps command used for fetch
-            cmd = p.command.lower()
 
             if cmd.startswith("ps ") and "-axo" in cmd:
                 continue
@@ -238,14 +235,14 @@ class ProcessFormatter:
             # Raw mode bypasses all formatting for simple, script-friendly output
             if args.raw:
                 lines.append(
-                    f"{p.pid} {p.user} {p.cpu:.1f} {p.mem:.1f} {p.command}"
+                    f"{p.pid} {p.user} {p.cpu:.1f} {p.mem:.1f} {cmd}"
                 )
                 continue
 
 
             # Apply padding BEFORE color
             pid_str = f"{p.pid:<{PID_W}}"
-            user_str = f"{p.user:<{USER_W}}"
+            user_str = f"{(p.user or '')[:USER_W]:<{USER_W}}"
             stat_str = f"{p.stat:<{STAT_W}}"
             cpu_str = f"{p.cpu:<{CPU_W}.1f}"
             tot_str = f"{total:<{TOT_W}.1f}"
@@ -291,20 +288,23 @@ class ProcessFormatter:
             if use_color:
 
                 pid_str = f"{pid_str}"
-                user_str = f"{fg(0xffffff)}{user_str}{RESET}"
-                stat_str = f"{fg(0x888888)}{stat_str}{RESET}"  # Gray
+                user_str = f"{fg(0x777777)}{user_str}{RESET}"
+                stat_str = f"{fg(0x777777)}{stat_str}{RESET}"  # Gray
 
                 # CPU special logic (override base gray)
-                if p.cpu >= 70:
+                if p.cpu >= args.cpu_state_threshold:
                     cpu_str = f"{fg(0xff0000)}{cpu_str}{RESET}"  # red
-                elif p.cpu >= 40:
-                    cpu_str = f"{fg(0xffffff)}{cpu_str}{RESET}"  # white
-                elif p.cpu >= 10:
-                    cpu_str = f"{fg(0xffffff)}{cpu_str}{RESET}"  # White
-                else:
-                    cpu_str = f"{fg(0xffffff)}{cpu_str}{RESET}"  # White
 
-                thr_str = f"{fg(0xffffff)}{thr_str}{RESET}"
+                elif p.cpu >= args.moderate_threshold:
+                    cpu_str = f"{fg(0xecbb00)}{cpu_str}{RESET}"  # orange
+
+                elif p.cpu >= args.light_threshold:
+                    cpu_str = f"{fg(0x009400)}{cpu_str}{RESET}"  # green
+
+                else:
+                    cpu_str = f"{fg(0xffffff)}{cpu_str}{RESET}"  # blue-ish idle
+
+                thr_str = f"{fg(0x777777)}{thr_str}{RESET}"
                 cmd_str = f"{cmd_str}"
 
             # Final line (NO formatting here anymore!)

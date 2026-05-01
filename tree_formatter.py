@@ -79,14 +79,14 @@ class ProcessTreeFormatter:
 
         visible_pids = {p.pid for p in processes}
 
-        roots, children = ProcessTreeBuilder.build(all_processes)
+        roots, children_map = ProcessTreeBuilder.build(all_processes)
 
         subtree_cache = {}
 
         # --------------------------------------------------------------------
         # Method: compute_subtree_cpu
         # --------------------------------------------------------------------
-        def compute_subtree_cpu(node, visited=None):
+        def compute_subtree_cpu(node, children_map, visited=None):
             """
             Compute total CPU usage for a process subtree.
 
@@ -142,8 +142,8 @@ class ProcessTreeFormatter:
 
             total = node.cpu
 
-            for child in children.get(node.pid, []):
-                total += compute_subtree_cpu(child, visited.copy())
+            for child in children_map.get(node.pid, []):
+                total += compute_subtree_cpu(child, children_map, visited.copy())
 
             subtree_cache[node.pid] = total
             return total
@@ -186,7 +186,7 @@ class ProcessTreeFormatter:
 
             # Use subtree CPU so entire branches are ranked by total activity
             if sort_key_outer == "cpu":
-                return compute_subtree_cpu(p)
+                return compute_subtree_cpu(p, children_map)
             elif sort_key_outer == "mem":
                 return p.mem
             elif sort_key_outer == "pid":
@@ -206,7 +206,7 @@ class ProcessTreeFormatter:
                 }
 
                 return priority.get(state, 99)
-            return compute_subtree_cpu(p)
+            return compute_subtree_cpu(p, children_map)
 
         # Apply sorting to root nodes.
         # Command sorting is handled separately to ensure consistent
@@ -360,7 +360,7 @@ class ProcessTreeFormatter:
                 return True
 
             # Otherwise, check children recursively
-            for child in children.get(node.pid, []):
+            for child in children_map.get(node.pid, []):
                 if has_visible_descendant(child, visited):
                     return True
 
@@ -419,7 +419,7 @@ class ProcessTreeFormatter:
         # --------------------------------------------------------------------
         # Method: render
         # --------------------------------------------------------------------
-        def render(node, prefix="", is_last=True, visited=None, depth=1):
+        def render(node, prefix="", is_last=True, visited=None, depth=1, is_leaf=False):
             """
             Render a process node and its subtree in a tree structure.
 
@@ -498,17 +498,17 @@ class ProcessTreeFormatter:
 
             if use_color:
                 pid_str = f"{fg(0xffffff)}{pid_str}{RESET}"
-                cmd_str = f"{RESET}{fg(0x00ffff)}{cmd_str}{RESET}"
+                cmd_str = f"{RESET}{fg(0x5287d6)}{cmd_str}{RESET}"
 
             user_str = node.user
 
             # Select glyph style for tree branches (ASCII / UTF-8 variants)
             if use_color:
-                user_str = f"{fg(0x009400)}{user_str}{RESET}"
+                user_str = f"{fg(0xaaaaaa)}{user_str}{RESET}"
 
             if node.pid in visible_pids:
                 # Compute total CPU for entire subtree (not just this process)
-                cpu_total = compute_subtree_cpu(node)
+                cpu_total = compute_subtree_cpu(node, children_map)
 
                 # Decide whether to show CPU based on flags and thresholds
                 # Decide whether to show CPU (CPUVW-style)
@@ -539,7 +539,7 @@ class ProcessTreeFormatter:
             sort_key = args.sort
 
             children_nodes = sorted(
-                children.get(node.pid, []),
+                children_map.get(node.pid, []),
                 key=lambda p: (
                     get_sort_value(p),
                     (p.command or "").lower()  # tie-breaker for stability
@@ -549,14 +549,17 @@ class ProcessTreeFormatter:
 
             # Keep only children that contribute visible content
             # (either directly visible or leading to visible descendants)
-            filtered_children = [
-                c for c in children_nodes
-                if should_render_node(c)
-            ]
+            filtered_children = children_nodes
 
             # Determine if node has no children (used for leaf marker glyph)
-            is_leaf = len(children.get(node.pid, [])) == 0
-            leaf_marker = glyph.get("leaf", "") if is_leaf else ""
+            is_leaf = len(filtered_children) == 0
+
+            # Diamond appears when:
+            # - no visible children
+            # - AND this is the end of a branch (last sibling OR no vertical continuation)
+            show_diamond = is_leaf
+
+            leaf_marker = glyph.get("leaf", "") if show_diamond else ""
 
             if leaf_marker:
                 # Attach optional leaf marker for visual clarity
@@ -564,6 +567,7 @@ class ProcessTreeFormatter:
                 prefix_with_marker = f"{line_prefix_clean}{leaf_marker} "
             else:
                 prefix_with_marker = line_prefix
+
 
             # Colorize tree structure separately from content
             if use_color:
@@ -580,10 +584,10 @@ class ProcessTreeFormatter:
 
             # Then append metadata AFTER
             left_part = (
-                f"  {pid_str:<4}"
-                f"{user_str:<6}"
-                f"{stat_str:<2}"
-                f"{cpu_part}"
+                f" {pid_str:<6} "
+                f"{user_str:<8} "
+                f"{stat_str:<2} "
+                f"{cpu_part:<2} "
             )
 
             # Measure visible width (excluding ANSI codes)
@@ -629,30 +633,36 @@ class ProcessTreeFormatter:
 
                     cmd_str = result
 
-            # Combine left-aligned fields with (possibly truncated) command
-            line = f"{left_part}{cmd_str}"
+            # ------------------------------------------
+            # CLEAN LEAF + PREFIX LOGIC (FINAL)
+            # ------------------------------------------
+            # ------------------------------------------
+            # FINAL TREE RENDER (CLEAN)
+            # ------------------------------------------
+
+            is_leaf = len(filtered_children) == 0
+
+            branch = glyph["last"] if is_last else glyph["branch"]
+            line_prefix = prefix + branch
+
+            if is_leaf and depth > 1 and "leaf" in glyph:
+                line = f"{line_prefix}{glyph['leaf']}{left_part}{cmd_str}"
+            else:
+                line = f"{line_prefix}{left_part}{cmd_str}"
+
             lines.append(line)
 
             # Stop recursion once maximum depth is reached
             if args.tree_depth is not None and depth >= args.tree_depth:
                 return
 
-            # Recursively render children with updated prefix and depth
-#            for idx, child in enumerate(filtered_children):
-#
-#                if child.pid == node.pid:
-#                    continue
+            children_nodes = children_map.get(node.pid, [])
 
-#                render(child, new_prefix, idx == len(filtered_children) - 1, visited, depth + 1)
+            for idx, child in enumerate(children_nodes):
 
-            for idx, child in enumerate(filtered_children):
+                is_last_child = (idx == len(children_nodes) - 1)
 
-                if child.pid == node.pid:
-                    continue
-
-                is_last_child = (idx == len(filtered_children) - 1)
-
-                # 🔥 THIS IS THE FIX
+                # Build next prefix correctly
                 if is_last:
                     new_prefix = prefix + glyph["space"]
                 else:
@@ -662,8 +672,7 @@ class ProcessTreeFormatter:
 
         # Render each root only if it contributes visible content
         for i, root in enumerate(roots):
-            if should_render_node(root):
-                render(root, "", i == len(roots) - 1, set(), 1)
+            render(root, "", i == len(roots) - 1, set(), 1)
 
         if args.number:
             # Apply global output limit after full rendering

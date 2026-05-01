@@ -231,42 +231,38 @@ class CPUAnalyzer:
         active_processes = [p for p in processes if p.cpu >= 10.0]
         active_count = len(active_processes)
 
-        # Flag: --allow-mod-local-dist condition
-        allow_moderate = args.allow_moderate_local_dist
+        # ------------------------------------------
+        # Threshold handling (safe + centralized)
+        # ------------------------------------------
+        heavy_threshold = args.cpu_state_threshold
+        moderate_threshold = args.moderate_threshold
+        light_threshold = args.light_threshold
 
-        if max_cpu < 10:
+        if max_cpu < light_threshold:
             return "IDLE"
 
-        elif max_cpu < 40:
+        elif max_cpu < moderate_threshold:
             return "LIGHT"
 
+        elif max_cpu < heavy_threshold:
 
-        elif max_cpu < 70:
+            # Sort processes by CPU descending
+            sorted_procs = sorted(processes, key=lambda p: p.cpu, reverse=True)
 
-            if allow_moderate:
+            # Rule 1: Many active processes → distributed
+            if active_count >= 3:
+                return "MODERATE_DISTRIBUTED"
 
-                # Sort processes by CPU descending
-                sorted_procs = sorted(processes, key=lambda p: p.cpu, reverse=True)
+            # Rule 2: Two strong processes sharing load → distributed
+            if len(sorted_procs) >= 2:
+                top_two_sum = sorted_procs[0].cpu + sorted_procs[1].cpu
 
-                # Default fallback
-                state = "MODERATE_LOCALIZED"
-
-                # Rule 1: Many active processes → distributed
-                if active_count >= 3:
+                if top_two_sum >= 60:
                     return "MODERATE_DISTRIBUTED"
 
-                # Rule 2: Two strong processes sharing load → distributed
-                if len(sorted_procs) >= 2:
-                    top_two_sum = sorted_procs[0].cpu + sorted_procs[1].cpu
+            # Default → localized moderate load
+            return "MODERATE_LOCALIZED"
 
-                    if top_two_sum >= 60:
-                        return "MODERATE_DISTRIBUTED"
-
-                return state
-
-            else:
-
-                return "MODERATE"
         else:
             if active_count >= 3:
                 return "HEAVY_DISTRIBUTED"
@@ -323,48 +319,35 @@ class CPUAnalyzer:
         # --------------------------------------
         # MODERATE (System under moderate load)
         # --------------------------------------
-        if "MODERATE" in state:
-
-            if state == "MODERATE_DISTRIBUTED":
-                # Use color
-                if use_color:
-                    return (
-                        f"{BOLD}{fg(0xffffff)}Moderate CPU activity {RESET}{fg(0xffffff)}is spread across {RESET}{BOLD}{fg(0xffffff)}multiple processes.\n{RESET}"
-                        f"{fg(0xaaaaaa)}Your system is under a {RESET}{fg(0xecbb00)}balanced yet noticeable workload.{RESET}"
-                    )
-                # No coloring
-                else:
-                    return (
-                        "Moderate CPU activity is spread across multiple processes.\n"
-                        "You system is under a balanced yet noticeable workload."
-                    )
-
-            elif state == "MODERATE_LOCALIZED":
-                # Use colors
-                if use_color:
-                    return (
-                        f"{BOLD}{fg(0xffffff)}Moderate CPU activity{RESET}{fg(0xffffff)} is driven by a {RESET}{BOLD}{fg(0xffffff)}limited number of processes.\n{RESET}"
-                        f"{fg(0xaaaaaa)}Your system is under a {RESET}{fg(0xecbb00)}focused workload.{RESET}"
-                    )
-
-                # No coloring
-                else:
-                    return (
-                        "Moderate CPU activity is driven by a limited number of processes.\n"
-                        "Your system is under a focused workload."
-                    )
-
+        if state == "MODERATE_DISTRIBUTED":
+            # Use color
+            if use_color:
+                return (
+                    f"{BOLD}{fg(0xffffff)}Moderate CPU activity {RESET}{fg(0xffffff)}is spread across {RESET}{BOLD}{fg(0xffffff)}multiple processes.\n{RESET}"
+                    f"{fg(0xaaaaaa)}Your system is under a {RESET}{fg(0xecbb00)}balanced yet noticeable workload.{RESET}"
+                )
+            # No coloring
             else:
-                if use_color:
-                    return (
-                        f"{fg(0xffffff)}Moderate CPU activity detected.\n{RESET}"
-                        f"{fg(0xaaaaaa)}Your system is under {RESET}{fg(0xecbb00)}moderate load.{RESET}"
-                    )
-                else:
-                    return (
-                        "Active workload detected. \n"
-                    "Your system is under moderate load."
-                    )
+                return (
+                    "Moderate CPU activity is spread across multiple processes.\n"
+                    "You system is under a balanced yet noticeable workload."
+                )
+
+        elif state == "MODERATE_LOCALIZED":
+            # Use colors
+            if use_color:
+                return (
+                    f"{BOLD}{fg(0xffffff)}Moderate CPU activity{RESET}{fg(0xffffff)} is driven by a {RESET}{BOLD}{fg(0xffffff)}limited number of processes.\n{RESET}"
+                    f"{fg(0xaaaaaa)}Your system is under a {RESET}{fg(0xecbb00)}focused workload.{RESET}"
+                )
+
+            # No coloring
+            else:
+                return (
+                    "Moderate CPU activity is driven by a limited number of processes.\n"
+                    "Your system is under a focused workload."
+                )
+
 
         # --------------------------------------
         # LIGHT (System under light load)
@@ -435,7 +418,7 @@ class CPUAnalyzer:
         """
 
         state = analysis["state"]
-        processes = analysis["filtered"]
+        processes = analysis.get("filtered", analysis.get("processes", []))
         dominant = analysis["dominant"]
         top = analysis["top"]
         cpu_count = get_cpu_count()
@@ -671,15 +654,15 @@ class CPUAnalyzer:
             if args.color:
                 if state == "IDLE":
                     lines.append(f"{fg(0xaaaaaa)}• {RESET}"
-                                 f"{fg(0x777777)}Most active process: {RESET}"
-                                 f"{fg(0xffffff)}{dominant.comm} {RESET}"
+                                 f"{fg(0xffffff)}Most active process: {RESET}"
+                                 f"{fg(0x777777)}{dominant.comm} {RESET}"
                                  f"{fg(0xaaaaaa)}({RESET}"
                                  f"{fg(0xffffff)}{dominant.cpu:.1f}{RESET}"
                                  f"{fg(0xaaaaaa)}%){RESET}")
                 else:
                     lines.append(f"{fg(0xaaaaaa)}• {RESET}"
-                                 f"{fg(0x777777)}Dominant workload: {RESET}"
-                                 f"{fg(0xffffff)}{dominant.comm} {RESET}"
+                                 f"{fg(0xffffff)}Dominant workload: {RESET}"
+                                 f"{fg(0x777777)}{dominant.comm} {RESET}"
                                  f"{fg(0xaaaaaa)}({RESET}"
                                  f"{fg(0xffffff)}{dominant.cpu:.1f}{RESET}"
                                  f"{fg(0xaaaaaa)}%){RESET}")
@@ -701,7 +684,7 @@ class CPUAnalyzer:
         if stat_chars:
             if args.color:
                 lines.append(f"{fg(0xaaaaaa)}• {RESET}"
-                             f"{fg(0x777777)}STAT indicates:{RESET}"
+                             f"{fg(0xffffff)}STAT indicates:{RESET}"
                              f"{fg(0xffffff)} {', '.join(stat_chars)}{RESET}")
             else:
                 lines.append(f"• STAT indicates: {', '.join(stat_chars)}")

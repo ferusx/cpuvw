@@ -655,7 +655,9 @@ def print_summary(count, use_color, mode="tree"):
         text = f"\n[Summary] Processes displayed: {count}\n"
 
     if use_color:
-        text = f"{fg(6)}{text}{RESET}"
+        text = f"{fg(0xaaaaaa)}{text}{RESET}"
+    else:
+        text = f"{text}"
 
     print(text)
 
@@ -884,3 +886,4 @@ def compute_usage(prev, curr):
         core_usages.append(usage)
 
     return core_usages
+

@@ -10,14 +10,12 @@ import json
 import termios
 import tty
 import select
-import tomllib
-from collections import defaultdict
 import subprocess
 from datetime import datetime
 
 # Local imports
 from constants import RESET, UNDERLINE, BOLD, fg
-from config import CONFIG_PATH, DEFAULT_TOML, load_config, save_config_copy
+from config import load_config, save_config_copy
 from fetcher import ProcessFetcher
 from tree_formatter import ProcessTreeFormatter
 from filters import ProcessFilter, ProcessSorter
@@ -27,7 +25,6 @@ from utils import (
     visible_len,
     extract_unique_stats,
     describe_stats,
-    print_summary,
     read_cp_times,
     get_per_core_usage,
 )
@@ -73,6 +70,10 @@ class CustomArgumentParser(argparse.ArgumentParser):
 
         raise SystemExit(status)
 
+    def error(self, message):
+        # Print ONLY the error message (no usage spam)
+        self._print_message(f"{self.prog}: error: {message}\n", sys.stderr)
+        raise SystemExit(2)
 
 # ****************************************************************************
 # Class: CPUVwApp
@@ -85,33 +86,35 @@ class CPUVwApp:
         # Validate flags and argument combinations
         self._validate_flags()
 
+
     # -------------------------------------------------------------------------------------
     # Method: _parse_args()
     # -------------------------------------------------------------------------------------
+    # noinspection PyMethodMayBeStatic
     def _parse_args(self):
-
         parser = CustomArgumentParser(
-            prog="cpuvw",
+            prog="CPUVw",
             description=f"{fg(0x00c900)}BSD CPU inspection Viewer{RESET}",
             formatter_class=argparse.RawTextHelpFormatter,
-            epilog=f"{BOLD}{fg(0xff0000)}Please, report bugs to:{RESET} hedningakjetil@gmail.com or "
+            epilog=f"{fg(0xecbb00)}{BOLD}NOTE:{RESET} All the above options that are marked with the word {fg(0x5287d6)}[configurable]{RESET} can be configured\n"
+                   f"in CPUVw's config file. See the man page's FILES and CONFIGURATION sections for more\n"
+                   f"information on the subject.\n\n"
+                   f"{BOLD}{fg(0xff0000)}Please, report bugs to:{RESET} hedningakjetil@gmail.com or "
                    f"at {UNDERLINE}https://bugs.freebsd.org/bugzilla/\n{RESET}"
             f"This tool's website: {fg(0x5287d6)}{UNDERLINE}https://github.com/ferusx/cpuvw{RESET}\n"
-            "\n"
         )
 
-        parser.add_argument(
-            "-s",
-            "--sort",
-            choices=["pid", "user", "cpu", "thr", "cmd"],
-            default="cpu",
-            help="Sort processes by field (default: cpu)"
-        )
-        parser.add_argument(
-            "--no-header",
-            action="store_true",
-            help="Show no column headers for the process table"
-        )
+
+        # This inline function sets a min/max limit for the --threshold flags argument.
+        # The allowed interval is 30.0 - 100.0. Error will be printed if not respected.
+        def threshold_type(value):
+            ivalue = int(value)
+            if ivalue < 30 or ivalue > 100:
+                raise argparse.ArgumentTypeError(
+                    "Threshold must be between 30 and 100"
+                )
+            return ivalue
+
         parser.add_argument(
             "-a",
             "--all",
@@ -119,38 +122,102 @@ class CPUVwApp:
             help="Show all processes, including 'idle'"
         )
         parser.add_argument(
-            '-P',
-            "--show-path",
+            "-b",
+            "--bottom",
             action="store_true",
-            help="Show path of each process"
+            default=None,
+            help="Reverse sort order (show lowest values first). [configurable]"
         )
         parser.add_argument(
             '-c',
             "--color",
             action="store_true",
-            help="Show colored output"
+            help="Show colored output. [configurable]"
         )
         parser.add_argument(
-            "-u",
-            "--user",
-            help="Show only processes for specified user"
+            '-H',
+            '--high-score',
+            action="store_true",
+            help="Show highest ever CPU for processes and last process' CPU. [configurable]"
         )
         parser.add_argument(
-            "-p",
-            "--pid",
+            '-d',
+            '--tree-depth',
             type=int,
-            help="Show only specified process ID"
+            default=5,
+            help="Maximum depth of process tree. [configurable]"
         )
         parser.add_argument(
             "-f",
-            "--filter",
-            help="Filter processes by command substring"
+            "--filter-command",
+            default=None,
+            help="Filter processes by command substring. [configurable]"
         )
         parser.add_argument(
-            "-b",
-            "--bottom",
+            '--filter-cpu',
+            default=None,
+            type=float,
+            help="Filter processes by CPU substring. [configurable]"
+        )
+        parser.add_argument(
+            '--filter-pid',
+            default=None,
+            type=int,
+            help="Filter processes by PID substring. [configurable]"
+        )
+        parser.add_argument(
+            '--filter-stat',
+            default=None,
+            help="Filter processes by stat substring. [configurable]"
+        )
+        parser.add_argument(
+            '--filter-user',
+            default=None,
+            help="Filter processes by user substring. [configurable]"
+        )
+        parser.add_argument(
+            '-F',
+            '--core-update-frequency',
+            type=float,
+            default=None,
+            help="Update frequency of logical processors in live mode\n"
+                 "(--show-logical-cpu avg). [configurable]"
+        )
+        parser.add_argument(
+            '-g',
+            "--glyph-style",
+            choices=["1", "2", "3"],
+            default="1",
+            help="Tree glyph style: 1=classic, 2=ascii, 3=fancy. [configurable]"
+        )
+        parser.add_argument(
+            '-i',
+            "--invert-headers",
+            choices=["white", "gray", "blue", "green", "orange", "purple", "teal", "maroon"],
+            default=None,
+            help="Invert the colors of the column headers. [configurable]"
+        )
+        parser.add_argument(
+            '-I',
+            '--stat-info',
             action="store_true",
-            help="Reverse sort order (show lowest values first)"
+            help="Explain process state (STAT) behavior for active processes.\n"
+                 "[configurable]"
+        )
+        parser.add_argument(
+            '-l',
+            '--show-logical-cpu',
+            nargs='?',
+            const='fast',  # ← used when flag is present without value
+            default=None,  # ← flag not used at all
+            choices=['fast', 'avg'],
+            help="Show per-core CPU usage (fast or avg). [configurable]"
+        )
+        parser.add_argument(
+            '-L',
+            '--show-low-cpu',
+            action="store_true",
+            help="Show not-so-meaningful processes. [configurable]"
         )
         parser.add_argument(
             "-n",
@@ -160,48 +227,84 @@ class CPUVwApp:
             help="Limit number of displayed processes (no limit by default)"
         )
         parser.add_argument(
+            '--hide-analysis',
+            action="store_true",
+            default=None,
+            help="Hide the deeper CPU insight sections above the process \n"
+                 "table. [configurable]"
+        )
+        parser.add_argument(
+            "--no-header",
+            action="store_true",
+            help="Show no column headers for the process table. [configurable]"
+        )
+        parser.add_argument(
+            '--no-table',
+            action="store_true",
+            default=None,
+            help="Don't show process table. [configurable]"
+        )
+        parser.add_argument(
+            "-p",
+            "--pid",
+            type=int,
+            help="Show only specified process ID"
+        )
+        parser.add_argument(
+            '-P',
+            "--show-path",
+            action="store_true",
+            help="Show path of each process. [configurable]"
+        )
+        parser.add_argument(
+            "--prune",
+            type=int,
+            metavar="LEVEL",
+            help="Prune low-value branches (higher = more aggressive, tree \n"
+                 "mode only). [configurable]"
+        )
+        parser.add_argument(
             '-r',
             '--raw',
             action="store_true",
             help="Show raw output"
         )
         parser.add_argument(
-            '-i',
-            "--invert-headers",
-            choices=["white", "gray", "blue", "green", "orange", "purple", "teal", "maroon"],
-            default=None,
-            help="Invert the colors of the column headers"
+            "-s",
+            "--sort",
+            choices=["pid", "user", "stat", "cpu", "thr", "cmd"],
+            default="cpu",
+            help="Sort processes by field (default: cpu). [configurable]"
         )
         parser.add_argument(
-            '-C',
-            '--high-score',
+            '-S',
+            "--save-config",
             action="store_true",
-            help="Show highest ever CPU for processes and last process' CPU"
+            help="Generate a fresh config file (safe copy)"
+        )
+        parser.add_argument(
+            '-T',
+            '--cpu-threshold',
+            dest='cpu_state_threshold',
+            type=float,
+            help="CPU% threshold for HEAVY state (30-100). [configurable]"
         )
         parser.add_argument(
             '-t',
-            '--cpu-threshold',
+            '--threshold',
+            dest='table_cpu_threshold',
             type=float,
-            help="Threshold for CPU in the table, e.g. 2.0 percent will not show processes \n"
-                 "with <2.0 percent usage (Can be configured in cpuvwrc.json)"
+            help="Minimum CPU% required to display a process in the table. [configurable]"
         )
         parser.add_argument(
-            '-L',
-            '--show-low-cpu',
+            '--tree',
             action="store_true",
-            help="Show not-so-meaningful processes. (Can be configured in cpuvwrc.json)"
+            help="Show tree of all processes and their children. [configurable]"
         )
         parser.add_argument(
-            '-m',
-            '--allow-moderate-local-dist',
-            action="store_true",
-            help="Enable LOCALIZED/DISTRIBUTED modes for the MODERATE CPU state"
-        )
-        parser.add_argument(
-            '-I',
-            '--stat-info',
-            action="store_true",
-            help="Explain process state (STAT) behavior for active processes"
+            "-u",
+            "--user",
+            help="Show only processes for specified user"
         )
         parser.add_argument(
             '-y',
@@ -211,69 +314,14 @@ class CPUVwApp:
                  "and reports about it"
         )
         parser.add_argument(
-            '--no-analysis',
-            action="store_true",
-            help="Don't run deeper analysis of CPU's state and active processes \n"
-        )
-        parser.add_argument(
-            '--no-table',
-            action="store_true",
-            help="Don't show process table"
-        )
-        parser.add_argument(
             '-w',
             '--line-wrap',
             action="store_true",
-            help="Wrap long lines in table to multiple lines. (i.e. when using --show-path)"
+            help="Wrap long lines in table to multiple lines. (i.e. when using \n"
+                 "--show-path). [configurable]"
         )
-        parser.add_argument(
-            '--tree',
-            action="store_true",
-            help="Show tree of all processes and their children"
-        )
-        parser.add_argument(
-            '-D',
-            '--tree-depth',
-            type=int,
-            default=5,
-            help="Maximum depth of process tree"
-        )
-        parser.add_argument(
-            '-g',
-            "--glyph-style",
-            choices=["1", "2", "3"],
-            default="3",
-            help="Tree glyph style: 1=classic, 2=ascii, 3=fancy"
-        )
-        parser.add_argument(
-            '--prune',
-            type=int,
-            default=0,
-            help="Prune processes tree to show less details"
-        )
-        parser.add_argument(
-            '-l',
-            '--show-logical-cpu',
-            nargs='?',  # ← THIS is the magic
-            const='fast',  # ← used when flag is present without value
-            default=None,  # ← flag not used at all
-            choices=['fast', 'avg'],
-            help="Show per-core CPU usage (fast or avg)"
-        )
-        parser.add_argument(
-            '-F',
-            '--core-update-frequency',
-            type=float,
-            default=None,
-            help="Update frequency of logical processors in live mode\n"
-                 "(--show-logical-cpu avg)"
-        )
-        parser.add_argument(
-            '-S',
-            "--save-config",
-            action="store_true",
-            help="Generate a fresh config file (safe copy)"
-        )
+
+
 
         return parser.parse_args()
 
@@ -296,6 +344,7 @@ class CPUVwApp:
     # -------------------------------------------------------------------------------------
     # Method: _key_pressed
     # -------------------------------------------------------------------------------------
+    # noinspection PyMethodMayBeStatic
     def _key_pressed(self):
         dr, _, _ = select.select([sys.stdin], [], [], 0)
         if dr:
@@ -305,6 +354,7 @@ class CPUVwApp:
     # -------------------------------------------------------------------------------------
     # Method: _parse_core_output
     # -------------------------------------------------------------------------------------
+    # noinspection PyMethodMayBeStatic
     def _parse_core_output(self, output):
         cores = []
         for line in output.strip().splitlines():
@@ -315,6 +365,7 @@ class CPUVwApp:
     # -------------------------------------------------------------------------------------
     # Method: _get_cpu_name
     # -------------------------------------------------------------------------------------
+    # noinspection PyMethodMayBeStatic
     def _get_cpu_name(self):
         try:
             out = subprocess.check_output(
@@ -345,11 +396,11 @@ class CPUVwApp:
         if mode == "fast":
             core_usages = get_per_core_usage()
 
+            self._render_core_grid(core_usages, args)
+            return
+
         elif mode == "avg":
 
-            prev = read_cp_times()
-
-            duration = 3.0
             interval = (
                 args.core_update_frequency
                 if args.core_update_frequency is not None
@@ -374,7 +425,6 @@ class CPUVwApp:
                             break
 
                     # -------- sampling --------
-                    time.sleep(interval)
                     curr = read_cp_times()
 
                     core_usages = []
@@ -397,6 +447,9 @@ class CPUVwApp:
                     os.system("clear")
 
                     self._render_core_grid(core_usages, args)
+
+                    # -------- sleep AFTER render --------
+                    time.sleep(interval)
 
             except KeyboardInterrupt:
                 print()
@@ -496,9 +549,6 @@ class CPUVwApp:
 
         args = self.args
 
-        # Use colors
-        use_color = args.color
-
         # High score
         use_high_schore = args.high_score
 
@@ -518,11 +568,76 @@ class CPUVwApp:
         config = load_config()
 
         # ------------------------------------------
-        # ARGS.SHOW_CORES
+        # CONFIG: [output] SECTION
+        # ------------------------------------------
+        use_color = args.color or config.get("output", {}).get("use_color", False)
+
+        show_low_cpu = (
+            args.show_low_cpu
+            if args.show_low_cpu
+            else config.get("output", {}).get("show_low_cpu", False)
+        )
+
+        if not args.no_header:
+            args.no_header = not config.get("output", {}).get("show_header", True)
+
+        if not args.stat_info:
+            args.stat_info = config.get("output", {}).get("show_stat_info", False)
+
+        if args.number is None:
+            cfg_limit = config.get("output", {}).get("limit", 0)
+            if cfg_limit > 0:
+                args.number = cfg_limit
+
+        if args.hide_analysis is None:
+            args.hide_analysis = config.get("output", {}).get("hide_analysis", False)
+
+        if args.no_table is None:
+            args.no_table = config.get("output", {}).get("no_table", False)
+
+        # ------------------------------------------
+        # CONFIG [table] SECTION
+        # ------------------------------------------
+        table_cfg = config.get("table", {})
+
+        # show_path
+        if not args.show_path:
+            args.show_path = table_cfg.get("show_path", False)
+
+        # wrap_lines
+        if not args.line_wrap:
+            args.line_wrap = table_cfg.get("wrap_lines", False)
+
+        # default_sort
+        if args.sort == "cpu":  # only override if user didn't explicitly choose
+            args.sort = table_cfg.get("default_sort", "cpu")
+
+        if args.bottom is None:
+            args.bottom = table_cfg.get("bottom_sort", False)
+
+        # invert_header
+        if args.invert_headers is None:
+            args.invert_headers = table_cfg.get("invert_header", None)
+
+        # Tree view
+        if not args.tree:
+            args.tree = table_cfg.get("show_tree_view", False)
+
+        # ------------------------------------------
+        # ARGS.SHOW_LOGICAL_CPU
         # ------------------------------------------
         if args.show_logical_cpu:
             self._show_cores_view(args, config)
             return
+
+        args.cpu_state_threshold = (
+            args.cpu_state_threshold
+            if args.cpu_state_threshold is not None
+            else config.get("cpu", {}).get("cpu_state_threshold", 70)
+        )
+
+        args.moderate_threshold = args.cpu_state_threshold - 30
+        args.light_threshold = max(0, args.moderate_threshold - 30)
 
         # ------------------------------------------
         # FETCH
@@ -535,18 +650,65 @@ class CPUVwApp:
         # ------------------------------------------
         processes = ProcessFilter.apply(processes, args)
 
+        if not processes:
+            print("No processes matched your filter criteria.")
+            return
+
         # ------------------------------------------
         # SORT
         # ------------------------------------------
         processes = ProcessSorter.apply(processes, args)
 
+        all_processes = list(processes)
 
         # ------------------------------------------
-        # TREE MODE
+        # TREE MODE (EARLY EXIT — BEFORE ANALYSIS)
         # ------------------------------------------
+        if args.tree:
+
+            fetcher = ProcessFetcher()
+            all_processes = fetcher.fetch(args)
+
+            processes = list(all_processes)
+
+            if not args.all:
+                processes = [
+                    p for p in processes
+                    if not (p.pid == 11 and "idle" in (p.command or "").lower())
+                ]
+
+            processes = ProcessFilter.apply(processes, args)
+
+            lines = ProcessTreeFormatter.format(
+                processes,
+                all_processes,
+                args,
+                use_color
+            )
+
+            table_cfg = config.get("table", {})
+
+            if args.number is not None:
+                limit = args.number
+            else:
+                limit = table_cfg.get("tree_limit", 20)
+
+            lines = lines[:limit]
+
+            for line in lines:
+                print(line)
+
+            print()
+            return
+
         # ------------------------------------------
-        # TREE OR TABLE MODE
+        # GLOBAL IDLE FILTER (applies to all flows)
         # ------------------------------------------
+        if not args.all:
+            processes = [
+                p for p in processes
+                if "idle" not in (p.command or "").lower()
+            ]
 
 
         # ------------------------------------------
@@ -554,8 +716,10 @@ class CPUVwApp:
         # ------------------------------------------
         if args.raw:
             formatter = ProcessFormatter()
+
+            # Force formatter to ONLY use provided processes
             lines = formatter.format(
-                processes,
+                processes[:args.number] if args.number is not None else processes,
                 use_color=False,
                 args=args,
                 invert_headers=args.invert_headers
@@ -566,6 +730,9 @@ class CPUVwApp:
 
             return
 
+        # --------------------------------------------------
+        # Resolve CPU STATE threshold (CLI > config)
+        # --------------------------------------------------
         analyzer = CPUAnalyzer()
         analysis = analyzer.analyze(
             processes,
@@ -579,7 +746,6 @@ class CPUVwApp:
         dominant = analysis["dominant"]
         top = analysis["top"]
         state = analysis["state"]
-
 
         # ==========================================
         # ANALYZE MODE (dedicated output)
@@ -638,7 +804,41 @@ class CPUVwApp:
             # --------------------------------------
             right_lines = []
 
-            visible = [p for p in top if not dominant or p.pid != dominant.pid]
+            # ------------------------------------------
+            # args.top - limit number of contributors
+            # ------------------------------------------
+            MAX_TOP = 10
+
+            if args.top is not None:
+                limit = min(args.top, MAX_TOP)
+            else:
+                limit = MAX_TOP
+
+            # ------------------------------------------
+            # FULL process list (always available)
+            # ------------------------------------------
+            sorted_procs = sorted(processes, key=lambda p: p.cpu, reverse=True)
+
+            # ------------------------------------------
+            # Override logic
+            # ------------------------------------------
+
+            if args.top is not None:
+
+
+                visible = [
+                    p for p in sorted_procs
+                    if not dominant or p.pid != dominant.pid
+                ][:limit]
+
+            else:
+                # fallback to analyzer result
+                filtered = [
+                    p for p in processes
+                    if not dominant or p.pid != dominant.pid
+                ]
+
+                visible = filtered[:limit]
 
             # Use color theme
             if use_color:
@@ -654,7 +854,7 @@ class CPUVwApp:
 
             dominant_pid = dominant.pid if dominant else None
 
-            for p in top:
+            for p in visible:
                 if dominant_pid and p.pid == dominant_pid:
                     continue
 
@@ -706,7 +906,7 @@ class CPUVwApp:
             return
 
         # --- Load previous run data ---
-        config_path = os.path.expanduser("~/.cpuvw.json")
+        config_path = os.path.expanduser("~/.config/cpuvw/scores.json")
 
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
@@ -731,9 +931,9 @@ class CPUVwApp:
         # Threshold resolution (CLI overrides config)
         # ------------------------------------------
         threshold = (
-            args.cpu_threshold
-            if args.cpu_threshold is not None
-            else config.get("cpu_threshold", 1.0)
+            args.table_cpu_threshold
+            if args.table_cpu_threshold is not None
+            else config.get("cpu", {}).get("cpu_threshold", 1.0)
         )
 
         show_low_cpu = args.show_low_cpu if hasattr(args, "show_low_cpu") else False
@@ -751,14 +951,6 @@ class CPUVwApp:
                 max_mem = p.mem
             if p.rss_mb > max_rss:
                 max_rss = p.rss_mb
-
-        # -------------------------------------------------------------------------------------
-        # SHOW BANNER
-        #    - conditional.
-        #    - shown with --banner flag.
-        # -------------------------------------------------------------------------------------
-        if args.banner:
-            self.show_banner(args)
 
         # -------------------------------------------------------------------------------------
         # SHOW HIGHEST SCORES
@@ -822,7 +1014,7 @@ class CPUVwApp:
         # HIDE everything except the table output
         #    - Hide all four analysis sections and display only table
         # -------------------------------------------------------------------------------------
-        if not args.no_analysis:
+        if not args.hide_analysis:
             # -------------------------------------------------------------------------------------
             # USER FOCUS Section
             #    - displays current highest number of threads for user
@@ -898,6 +1090,7 @@ class CPUVwApp:
             # ==========================================
             # Right Side (Dominant + contributors)
             # ==========================================
+
             right_lines = []
 
             # ------------------------------------------
@@ -1098,11 +1291,10 @@ class CPUVwApp:
         count = len(meaningful)
 
         # Compute dynamic limit
-        caps = config.get("caps", {})
-        bias = config.get("bias", {})
+        state_cfg = config.get("states", {}).get(state, {})
 
-        cap = caps.get(state, 5)
-        bias_val = bias.get(state, 0)
+        min_procs = state_cfg.get("min", 0)
+        max_procs = state_cfg.get("max", 5)
 
         # ------------------------------------------
         # FINAL LIMIT LOGIC
@@ -1110,18 +1302,37 @@ class CPUVwApp:
         if args.number is not None:
             limit = args.number
         else:
-            if count == 0:
-                limit = 0
-            else:
-                limit = min(count + bias_val, cap)
+            limit = min(max(count, min_procs), max_procs)
+
+        # ------------------------------------------
+        # REMOVE IDLE (FINAL SANITIZATION)
+        # ------------------------------------------
+        if not args.all:
+            meaningful = [
+                p for p in meaningful
+                if "idle" not in (p.command or "").lower()
+            ]
 
         # Assemble final list
         if show_low_cpu:
-            combined = meaningful + low_cpu
+            combined = [p for p in processes if p in meaningful or p in low_cpu]
         else:
-            combined = meaningful
+            combined = [p for p in processes if p in meaningful]
 
-        processes = combined[:limit]
+        if args.number is not None:
+            processes = processes[:limit]
+
+        else:
+            if combined:
+                processes = combined[:limit]
+            else:
+                if show_low_cpu:
+                    processes = processes[:max_procs]
+                else:
+                    processes = [
+                        p for p in processes
+                        if p.cpu >= threshold
+                    ][:max_procs]
 
 
         # ------------------------------------------
@@ -1149,12 +1360,21 @@ class CPUVwApp:
                 args
             )
 
+
+        # ------------------------------------------
+        # PRINT TABLE
+        # ------------------------------------------
+        if not args.no_table:
+            for line in lines:
+                print(line)
+
+            print()
+
         # ------------------------------------------
         # STAT INFO SECTION
         # ------------------------------------------
         if args.stat_info:
             right_lines = []
-            right_lines.append("")  # spacer
 
             if use_color:  # Use color theme
                 right_lines.append(f"{fg(0xaaaaaa)}STAT Analysis:{RESET}")
@@ -1162,7 +1382,17 @@ class CPUVwApp:
                 right_lines.append("STAT Analysis:")
 
             # Active processes (reuse same threshold logic later if needed)
-            active = [p for p in processes if p.cpu >= config.get("cpu_threshold", 1.0)]
+            threshold = (
+                args.table_cpu_threshold
+                if args.table_cpu_threshold is not None
+                else config.get("cpu", {}).get("cpu_threshold", 1.0)
+            )
+
+            if args.number is not None:
+                # When user forces output, analyze visible processes instead
+                active = processes
+            else:
+                active = [p for p in processes if p.cpu >= threshold]
 
             right_lines.append(f"• {len(active)} active processes detected")
 
@@ -1188,93 +1418,29 @@ class CPUVwApp:
             for line in right_lines:
                 print(line)
 
-        else:
-            ## ------------------------------------------
-            ## Show when CPUVw was executed at bottom
-            ## ------------------------------------------
-            # ------------------------------------------
-            # color the by-line
-            # ------------------------------------------
-            if use_color:  # Use color theme
-                now = datetime.now().astimezone()
-                print(f"{BOLD}{fg(0xffffff)}CPUVw{RESET}{fg(0xaaaaaa)} was executed at: {RESET}"
-                    + f"{fg(+0xaaaaaa) + now.strftime("%a %b %d %H:%M:%S %Z %Y")}"
-                )
-            # ------------------------------------------
-            # Use no colors
-            # ------------------------------------------
-            else:
-                now = datetime.now().astimezone()
-                print(f"{BOLD}CPUVw{RESET} was executed at: "
-                      + now.strftime("%a %b %d %H:%M:%S %Z %Y")
-                      )
+            print()
 
-        print(" ")  # Newline
-
+        ## ------------------------------------------
+        ## Show when CPUVw was executed at bottom
+        ## ------------------------------------------
         # ------------------------------------------
-        # FETCH
+        # color the by-line
         # ------------------------------------------
-        fetcher = ProcessFetcher()
-        processes = fetcher.fetch(args)
 
-        # ------------------------------------------
-        # FILTER + SORT
-        # ------------------------------------------
-        # (your existing logic here)
-
-        if args.tree:
-
-            # ------------------------------------------
-            # FETCH FULL SYSTEM (NO FILTERS)
-            # ------------------------------------------
-            fetcher = ProcessFetcher()
-            all_processes = fetcher.fetch(args)
-
-            # ------------------------------------------
-            # CREATE VISIBLE SET
-            # ------------------------------------------
-            processes = list(all_processes)
-
-            if not args.all:
-                processes = [
-                    p for p in processes
-                    if not (p.pid == 11 and "idle" in (p.command or "").lower())
-                ]
-
-            processes = ProcessFilter.apply(processes, args)
-
-            # DO NOT SORT
-            # DO NOT SLICE HERE
-
-            # ------------------------------------------
-            # TREE RENDER
-            # ------------------------------------------
-            lines = ProcessTreeFormatter.format(
-                processes,
-                all_processes,
-                args,
-                use_color
+        if use_color:  # Use color theme
+            now = datetime.now().astimezone()
+            print(f"{BOLD}{fg(0xffffff)}CPUVw{RESET}{fg(0xaaaaaa)} was executed at: {RESET}"
+                + f"{fg(+0xaaaaaa) + now.strftime("%a %b %d %H:%M:%S %Z %Y")}"
             )
 
-            # ------------------------------------------
-            # APPLY NUMBER AFTER
-            # ------------------------------------------
-            if args.number:
-                lines = lines[:args.number]
-
         # ------------------------------------------
-        # 🔥 THIS IS WHERE YOUR BLOCK GOES
+        # Use no colors
         # ------------------------------------------
-
-        # PRINT OUTPUT
-        for line in lines:
-            print(line)
-
-        # SUMMARY
-        if args.tree:
-            print_summary(len(lines), use_color)
         else:
-            print_summary(len(processes), use_color, mode="table")
+            now = datetime.now().astimezone()
+            print(f"{BOLD}CPUVw{RESET} was executed at: "
+                  + now.strftime("%a %b %d %H:%M:%S %Z %Y")
+                  )
 
         # ------------------------------------------
         # High Score: Save current run to JSON file

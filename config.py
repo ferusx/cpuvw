@@ -23,10 +23,15 @@ DEFAULT_TOML = """\
 # This section contains general settings for the CPU 
 # output. 
 #
-# threshold {n}:
+# cpu_threshold {number}:
 #         Sets the minimum % for CPU usage for processes
 #         to be shown.
-# heavy/active/low {n}: 
+# cpu_state_threshold {number}:
+#         Sets min % for when CPU STATE triggers HEAVY
+#         mode. I.e. a setting of 50, would trigger the
+#         HEAVY_X state at 50 CPU% rather than at 70%,
+#         which is the default limit. 
+# heavy/active/low {number}: 
 #         Thresholds for CPU state classification (%). 
 #         These values determine when the system is 
 #         considered:
@@ -37,10 +42,11 @@ DEFAULT_TOML = """\
 # ----------------------------------------------------
 
 [cpu]
-threshold = 1.0         # Min CPU% for procs to show
-heavy = 80              # Min value to ...
-active = 40             # Min value to ...
-low = 20                # Min value to ...
+cpu_threshold = 1.0      # Min CPU% for procs to show
+cpu_state_threshold = 70 # Min CPU% to trigger heavy state
+heavy = 80               # Min value for HEAVY state
+active = 40              # Min value for MODERATE state
+low = 20                 # Min value for LIGHT state
 
 # ----------------------------------------------------
 # This section contains special settings that relates
@@ -82,17 +88,21 @@ max = 3                  # Max value for procs to show
 min = 0                  # Min value for procs to show
 max = 4                  # Max value for procs to show
 
-[states.MODERATE]        # MODERATE CPU STATE
+[states.MODERATE_LOCALIZED] # MOD FOCUSED WORKLOAD
+min = 0                  # Min value for procs to show
+max = 5                  # Max value for procs to show
+
+[states.MODERATE_DISTRIBUTED] # MOD SPREAD WORKLOAD
+min = 0                  # Min value for procs to show
+max = 8                  # Max value for procs to show
+
+[states.HEAVY_LOCALIZED] # HEAVY FOCUSED WORKLOAD
 min = 0                  # Min value for procs to show
 max = 6                  # Max value for procs to show
 
-[states.HEAVY_LOCALIZED] # HEAVY_LOCALIZED CPU STATE
+[states.HEAVY_DISTRIBUTED] # HEAVY SPREAD WORKLOAD
 min = 0                  # Min value for procs to show
-max = 6                  # Max value for procs to show
-
-[states.HEAVY_DISTRIBUTED] # HEAVY_DISTRIBUTED CPU STATE
-min = 0                    # Min value for procs to show
-max = 10                   # Max value for procs to show
+max = 10                 # Max value for procs to show
 
 # ====================================================
 # Output behavior
@@ -101,28 +111,45 @@ max = 10                   # Max value for procs to show
 # ---------------------------------------------------- 
 # This section contains general settings for the output.
 #
-# show_low_cpu: 
+# show_low_cpu {true|false}: 
 #         Shows processes below 'threshold' (see 'thres-
-#         hold' above)
-# use_color: 
-#         Applies colored output by default. There is no
-#         longer a need to use --color flag.
+#         hold' above).
 # show_header: 
 #         Show/hide the column header for table.
-# show_summary: 
-#         Show/hide the summary section below the table 
-#         (e.g. "X / Y cores saturated")
-# limit:  
+# show_stat_info {true|false}:
+#         Will display explanations about the STAT column
+#         below the process table.
+# hide_analysis {true|false}:
+#         Enable/disable analysis sections above the 
+#         table. When false, only the process table is 
+#         shown.
+# no_table {true|false}:
+#         Show/hide the process table section at the
+#         bottom of the output. This will hide the ent-
+#         ire analysis section at the top. 
+# use_color {true|false}: 
+#         Applies colored output by default. There is no
+#         longer a need to use --color flag.
+# limit {number}:  
 #         Maximum number of processes to display in the
 #         table. 0 = no limit (show all eligible proc-
-#         esses)
+#         esses). 
+#         
+#         NOTE: the 0 setting, does not show all proces-
+#         ses anyway. If set to 0, the number of proces-
+#         ses will follow the  "State display limits" 
+#         section just above this one. In order to temp-
+#         orarily show a certain number of processes,
+#         use the --number option.
 # ---------------------------------------------------- 
 
 [output]
 show_low_cpu = false       # Show CPU % below 'threshold'
-use_color = true           # Apply colored output
 show_header = true         # Show/hide column header
-show_summary = true        # 
+show_stat_info = false     # Info about STAT below table
+hide_analysis = false      # Show/hide top sections
+no_table = false           # Show/hide process table 
+use_color = false          # Apply colored output
 limit = 0                  # 0 = no limit
 
 # ====================================================
@@ -130,49 +157,59 @@ limit = 0                  # 0 = no limit
 # ====================================================
 
 # ----------------------------------------------------
-# show_path:
-#         show full path in COMMAND column (table).
-# wrap_lines: 
-#         line wrap the paths when show_path is enabled. 
-# default_sort {pid|user|cpu|thr|cmd}: 
+# show_path {true|false}:
+#         Show full path in COMMAND column (table).
+# wrap_lines {true|false}: 
+#         Line wrap the paths when show_path is enabled. 
+# default_sort {pid|user|cpu|thread|cmd}: 
 #         Default sorting order.
-# invert_header {white,gray,blue,green,orange,purple,
-#                 teal,maroon}: 
-#         Inverts the the colors in the column header 
+# bottom_sort {true|false}:
+#         Sort the table in descending order.
+# invert_header {default,white,gray,blue,green,orange,
+#                purple,teal,maroon}: 
+#         Inverts the colors in the column header 
 #         and applies a color instead of the regular 
 #         white color. 
 # show_tree_view {true|false}:
 #         Enable/disable tree view for processes inst-
 #         ead of table view.
+# tree_limit {number}
+#         default number of processes in tree view.
 # ----------------------------------------------------
 
 [table]
 show_path = false          # Show/hide full path (CMD)
 wrap_lines = false         # Line wrap long paths (CMD)
 default_sort = "cpu"       # Default sorting order
-invert_header = "white"   # Colod invert column header
-show_tree_view = false   # View process output in tree
+bottom_sort = false        # Descending sort for table
+invert_header = "default"  # Invert and set column hea-
+                           # der colors.
+show_tree_view = false     # View process output in tree
+tree_limit = 20            # default number of processes
 
 # ====================================================
-# Advanced behavior
+# FILTER section
 # ====================================================
-
-[advanced]
-# ---------------------------------------------------- 
-# This section allows for advanced behavior settings.
+# ----------------------------------------------------
+# This section manages filtering in the table's columns
 #
-# allow_moderate_local_dist {true|false}:
-#         Splits the MODERATE CPU state into localized
-#         and distributed, just like the heavy state.
-#         Default, false, is localized only. Like LIGHT.
-# show_analysis {true|false}:
-#         Enable/disable analysis sections above the 
-#         table. When false, only the process table is 
-#         shown.
-# ---------------------------------------------------- 
+# pid {number}
+#         Sorts the PID column for the specified number
+# user {username}
+#         SOrts the user column for the specified name
+# stat {abbreviation}
+#         Sorts the stat column for given abbreviation
+# cpu {float}
+#         Searches the CPU% column for processes
+#
+# ----------------------------------------------------
 
-allow_moderate_local_dist = true # split MODERATE states
-analysis_enabled = true          # Show/hide top sections
+[filter]
+pid = 0
+user = ""
+stat = ""
+cpu = 0.0
+command = ""
 """
 
 # -------------------------------------------------------------------------
