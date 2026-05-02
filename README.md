@@ -37,7 +37,8 @@ Unlike traditional tools such as `top` or `htop`, CPUVw aims to:
 ```bash
 python cpuvw.py
 python cpuvw.py --analyze
-python cpuvw.py --color
+python cpuvw.py --color --show-logical-cpu
+python cpuvw.py --cpu-threshold 8.0
 ```
 
 ## Notes
