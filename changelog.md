@@ -1,6 +1,6 @@
 # CPUVw Changelog
 
-## 0.1 - Initial Release
+## 0.1 - Initial Commit [unreleased]
 
 ### Added
 - CPU state detection (IDLE, LIGHT, MODERATE, HEAVY)
@@ -126,3 +126,55 @@
   - Process visibility filtering
 
 ---
+
+## [0.5.0] - 2026-05-03
+
+## [Unreleased]
+
+### Added
+- Tree mode now includes a summary line:
+  - `[Summary] Nodes displayed: N`
+- Implemented accurate visible node counting in tree view
+- Introduced robust pruning integration (`--prune`) with correct traversal logic
+
+### Improved
+- Tree rendering system fully rebuilt and stabilized:
+  - Correct glyph alignment
+  - Proper diamond (◆) placement for leaf nodes
+  - Fixed branch-to-node connection logic
+- Output is now fully pipe-safe:
+  - Removed ANSI leakage in non-color output
+  - Clean behavior with `less`, `more`, `grep`, and other UNIX tools
+- Consistent `.rstrip()` handling applied at output boundaries
+- Analyzer output formatting cleaned and stabilized
+- Side-by-side layout (Activity Overview) no longer produces trailing whitespace
+- Column headers simplified (removed inverted header system)
+- All `--filter-pid`, `--filter-user`, etc, flags, were consolidated into one flag `--filter subcategory arg` with sub commands instead, i.e. `--filter pid PID`, and `--filter user USER`, etc
+
+### Removed
+- Removed `--invert-header` feature and all related ANSI background logic
+- Removed partially implemented `--top` flag and all dependent logic
+- Removed duplicate and unused rendering variables (`branch_width`, `base_len`, etc.)
+- Removed redundant ANSI formatting in colorless mode
+- Removed all the obsolete `--filter-*` flags
+
+### Fixed
+- Fixed double-diamond (◆◆) rendering bug in tree mode
+- Fixed misplaced diamond glyph (`◆──` → `──◆`)
+- Fixed incorrect glyph spacing and alignment issues
+- Fixed `--prune` having no effect due to missing render logic
+- Fixed `--with-parents` filtering inconsistencies
+- Fixed incorrect node count in summary (was counting hidden nodes)
+- Fixed ANSI escape sequences leaking into piped output
+- Fixed wrapping issues in pagers (`less` / `more`) caused by trailing spaces
+- Fixed analyzer crash due to leftover `args.top` reference
+- Fixed inconsistent color application in analysis output
+
+### Internal
+- Restored critical guard logic in `render()`:
+  - user filtering
+  - depth limiting
+  - recursion safety
+- Reintroduced proper child filtering pipeline with pruning
+- Standardized color handling via `use_color` checks
+- Improved separation between formatting and output layers

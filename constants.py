@@ -193,23 +193,22 @@ DEFAULT_CPU_THRESHOLD = 1.0  # Minimum CPU (%) required to display subtree usage
 #
 GLYPH_STYLES = {
     "1": {
-        "branch": "├──",
-        "last":   "└──",
-        "pipe":   "│ ",
-        "space":  "   ",
+        "branch": "├── ",
+        "last":   "└── ",
+        "pipe":   "│   ",
+        "space":  "    ",
     },
     "2": {  # ascii
-        "branch": "|-",
-        "last": "`-",
-        "pipe": "| ",
-        "space": "  ",
+        "branch": "|- ",    # 3 → force to 4
+        "last":   "`- ",
+        "pipe":   "|   ",
+        "space":  "    ",
     },
-    "3": {  # fancy
-        "branch": "├─",
-        "last": "└─",
-        "leaf_branch": " └◆ ",
-        "leaf": "◆ ",
-        "pipe": "│  ",
-        "space": "   ",
+    "3": {
+        "branch": "├── ",
+        "last":   "└── ",
+        "pipe":   "│   ",
+        "space":  "    ",
+        "leaf":   "◆"
     }
 }

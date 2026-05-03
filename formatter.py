@@ -58,7 +58,6 @@ class ProcessFormatter:
     def format(
             processes: List[ProcessInfo],
             use_color: bool,
-            invert_headers:str,
             args
     ) -> List[str]:
         """
@@ -155,40 +154,22 @@ class ProcessFormatter:
 
         parts = []
 
-        # Inverted headers is used
-        if invert_headers:
-            bg_color, fg_color = INVERT_HEADER_COLORS.get(
-                invert_headers, (0xffffff, 0x000000)
-            )
+        for name, width in columns:
+            if width:
+                padded = name.ljust(width)
+            else:
+                padded = name  # COMMAND column (no fixed width)
 
-            for name, width in columns:
+            parts.append(padded)
 
-                # padded INSIDE the block
-                if width:
-                    padded = name.ljust(width)
-                else:
-                    padded = name
+        header = "".join(parts)
 
-                block = f"{bg(bg_color)}{fg(fg_color)}{padded}{RESET}"
+        # Apply color ONLY if enabled
+        if use_color:
+            header = f"{fg(0xffffff)}{header}{RESET}"
 
-                parts.append(block)
-
-            header = "".join(parts)
-
-        # No inverted headers
-        else:
-            for name, width in columns:
-                if width:
-                    padded = name.ljust(width)
-
-                    parts.append(padded)
-                else:
-                    # COMMAND column (no fixed width)
-                    parts.append(name)
-
-            header = "".join(parts)
-
-        if not args.no_header:
+        if not args.hide_header:
+            print()
             lines.append("")
             lines.append(header)
             total_width = (
@@ -287,7 +268,7 @@ class ProcessFormatter:
             # Apply colors AFTER padding to preserve column alignment
             if use_color:
 
-                pid_str = f"{pid_str}"
+                pid_str = f"{fg(0x5287d6)}{pid_str}{RESET}"
                 user_str = f"{fg(0x777777)}{user_str}{RESET}"
                 stat_str = f"{fg(0x777777)}{stat_str}{RESET}"  # Gray
 
@@ -302,10 +283,10 @@ class ProcessFormatter:
                     cpu_str = f"{fg(0x009400)}{cpu_str}{RESET}"  # green
 
                 else:
-                    cpu_str = f"{fg(0xffffff)}{cpu_str}{RESET}"  # blue-ish idle
+                    cpu_str = f"{fg(0xffffff)}{cpu_str}{RESET}"  # white
 
                 thr_str = f"{fg(0x777777)}{thr_str}{RESET}"
-                cmd_str = f"{cmd_str}"
+                cmd_str = f"{fg(0x5287d6)}{cmd_str}{RESET}"
 
             # Final line (NO formatting here anymore!)
             line = (

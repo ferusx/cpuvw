@@ -3,18 +3,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Markus Johnsson
 
-import shutil
+
 from typing import List
-from collections import defaultdict
+
 
 # Local imports
 from tree_builder import ProcessTreeBuilder
 from models import ProcessInfo
-from utils import get_exec_name, visible_len
+from utils import get_exec_name
 from constants import (
     GLYPH_STYLES,
     RESET,
-    DEFAULT_CPU_THRESHOLD, fg,
+    fg,
 )
 
 # =========================================================
@@ -76,12 +76,46 @@ class ProcessTreeFormatter:
             - Only processes in `processes` are considered visible
             - Rendering respects depth limits and pruning rules
         """
+        lines = []
+        visible_pids = {p.pid for p in processes}
+        rendered_pids = set()
 
+        if args.with_parents:
+            roots, children_map = ProcessTreeBuilder.build(all_processes)
+
+            # ------------------------------------------
+            # BUILD VISIBLE SET (ONLY PLACE WE DECIDE)
+            # ------------------------------------------
+            visible_pids = {p.pid for p in processes}
+
+            if args.with_parents:
+                pid_map = {p.pid: p for p in all_processes}
+
+                expanded = set(visible_pids)
+
+                for p in processes:
+                    current = p
+                    while current.ppid in pid_map:
+                        parent = pid_map[current.ppid]
+                        if parent.pid in expanded:
+                            break
+                        expanded.add(parent.pid)
+                        current = parent
+
+                visible_pids = expanded
+        else:
+            roots, children_map = ProcessTreeBuilder.build(processes)
+
+        # ------------------------------------------
+        # STRICT USER FILTER (DEFAULT)
+        # ------------------------------------------
         visible_pids = {p.pid for p in processes}
 
-        roots, children_map = ProcessTreeBuilder.build(all_processes)
+        if not args.with_parents:
+            roots = [p for p in processes if p.pid in visible_pids]
 
         subtree_cache = {}
+
 
         # --------------------------------------------------------------------
         # Method: compute_subtree_cpu
@@ -306,6 +340,46 @@ class ProcessTreeFormatter:
                         return True
 
             return False
+
+        # --------------------------------------------------------------------
+        # function: count_visible_nodes
+        # --------------------------------------------------------------------
+        def count_visible_nodes():
+            visited = set()
+
+            def walk(node, depth):
+                if node.pid in visited:
+                    return
+
+                # SAME guards as render
+                if not args.with_parents:
+                    if args.user is not None and node.user != args.user:
+                        return
+                    if node.pid not in visible_pids:
+                        return
+
+                if args.tree_depth is not None and depth > args.tree_depth:
+                    return
+
+                visited.add(node.pid)
+
+                prune = args.prune or 0
+
+                for child in children_map.get(node.pid, []):
+                    if child.pid not in visible_pids:
+                        continue
+
+                    if prune >= 1 and is_boring(child):
+                        continue
+
+                    walk(child, depth + 1)
+
+            # 🚨 IMPORTANT: still loop roots, BUT visited prevents duplicates
+            for root in roots:
+                walk(root, 1)
+
+            return len(visited)
+
         # --------------------------------------------------------------------
         # Method: has_visible_descendant
         # --------------------------------------------------------------------
@@ -371,30 +445,35 @@ class ProcessTreeFormatter:
         # --------------------------------------------------------------------
         def should_render_node(node):
             """
-            Decide whether a node should be rendered based on prune level.
-
-            Behavior:
-
-                prune = 0
-                    No pruning → render all nodes that contribute to structure
-
-                prune >= 1
-                    Apply pruning rules → hide low-value nodes unless they lead
-                    to visible descendants
-
-            This ensures that tree structure is preserved while allowing
-            progressively more aggressive noise reduction at higher levels.
+            Decide whether a node should be rendered based on mode and prune level.
             """
 
-            prune_level = args.prune or 0
+            # ------------------------------------------
+            # STRICT MODE
+            # ------------------------------------------
+            if not args.with_parents:
+                return node.pid in visible_pids
 
-            # No pruning → show full structural tree
-            if prune_level == 0:
-                # Pure structural rendering (no filtering)
-                return has_visible_descendant(node)
+            # ------------------------------------------
+            # WITH PARENTS MODE
+            # ------------------------------------------
 
-            # Pruning active → hide boring nodes unless they lead to something useful
-            return has_visible_descendant(node) and not is_boring(node)
+            # Direct match → always show
+            if node.pid in visible_pids:
+                return True
+
+            # Walk children manually (guaranteed correct)
+            stack = list(children_map.get(node.pid, []))
+
+            while stack:
+                child = stack.pop()
+
+                if child.pid in visible_pids:
+                    return True
+
+                stack.extend(children_map.get(child.pid, []))
+
+            return False
 
         # --------------------------------------------------------------------
         # Method: format_subtree_cpu
@@ -417,52 +496,81 @@ class ProcessTreeFormatter:
             return f"{value:.1f}%"
 
         # --------------------------------------------------------------------
+        # function: build_tree_structure
+        # --------------------------------------------------------------------
+        def build_tree_structure():
+            visited = set()
+
+            def walk(node, depth):
+                if node.pid in visited:
+                    return None
+
+                if not args.with_parents:
+                    if args.user is not None and node.user != args.user:
+                        return None
+                    if node.pid not in visible_pids:
+                        return None
+
+                if args.tree_depth is not None and depth > args.tree_depth:
+                    return None
+
+                visited.add(node.pid)
+
+                prune = args.prune or 0
+
+                children_nodes = []
+                for child in children_map.get(node.pid, []):
+                    if child.pid not in visible_pids:
+                        continue
+
+                    if prune >= 1 and is_boring(child):
+                        continue
+
+                    child_tree = walk(child, depth + 1)
+                    if child_tree:
+                        children_nodes.append(child_tree)
+
+                return {
+                    "pid": node.pid,
+                    "children": children_nodes
+                }
+
+            tree = []
+            for root in roots:
+                node_tree = walk(root, 1)
+                if node_tree:
+                    tree.append(node_tree)
+
+            return tree
+
+        # --------------------------------------------------------------------
+        # function: count_nodes
+        # --------------------------------------------------------------------
+        def count_nodes(nodes):
+            total = 0
+            for n in nodes:
+                if not n:
+                    continue
+                total += 1
+                total += count_nodes(n.get("children", []))
+            return total
+
+        # --------------------------------------------------------------------
         # Method: render
         # --------------------------------------------------------------------
-        def render(node, prefix="", is_last=True, visited=None, depth=1, is_leaf=False):
-            """
-            Render a process node and its subtree in a tree structure.
+        def render(node, levels, is_last, depth, parent_pid_col):
 
-            This function is the core of the tree view. It walks the process
-            hierarchy recursively and constructs formatted output lines with:
+            # ------------------------------------------
+            # GUARD
+            # ------------------------------------------
+            if not args.with_parents:
+                # Only apply user filter if user was specified
+                if args.user is not None:
+                    if node.user != args.user:
+                        return
 
-                - Tree glyphs (branches, connectors)
-                - Optional CPU annotations (subtree-based)
-                - Colorized fields (PID, USER, COMMAND)
-                - Depth limiting and pruning safeguards
-
-            Behavior:
-
-                - Traverses nodes depth-first
-                - Stops recursion when --tree-depth is exceeded
-                - Avoids duplicate rendering via `printed`
-                - Prevents infinite loops via `visited`
-                - Adapts output based on flags like --show-path,
-                  --cpu-all, and --cpu-threshold
-
-            Args:
-                node (ProcessInfo):
-                    Current process node to render.
-
-                prefix (str):
-                    Accumulated tree prefix used to draw structure.
-
-                is_last (bool):
-                    Whether this node is the last child in its branch.
-
-                visited (set, optional):
-                    Tracks visited nodes to prevent recursion loops.
-
-                depth (int):
-                    Current recursion depth.
-
-            Notes:
-
-                - Rendering is stateful: relies on shared structures like
-                  `printed`, `visible_pids`, and `children`.
-                - CPU display is based on subtree aggregation, not per-process CPU.
-                - This function only builds lines — it does not print directly.
-            """
+                if node.pid not in visible_pids:
+                    return
 
             # Enforce user-defined depth limit (--tree-depth)
             if args.tree_depth is not None and depth > args.tree_depth:
@@ -471,211 +579,131 @@ class ProcessTreeFormatter:
             if node.pid in printed:
                 return
 
-            # Prevent rendering the same PID multiple times (global safeguard)
             printed.add(node.pid)
-            if visited is None:
-                visited = set()
 
-            # Prevent infinite recursion in malformed process graphs
-            if node.pid in visited:
-                return
-
-            visited.add(node.pid)
-
-            # Select glyph style for tree branches (ASCII / UTF-8 variants)
+            # ------------------------------------------
+            # GLYPH STYLE (ONLY SOURCE OF TRUTH)
+            # ------------------------------------------
             glyph = GLYPH_STYLES.get(str(args.glyph_style or "1"), GLYPH_STYLES["1"])
-
-            branch = glyph["last"] if is_last else glyph["branch"]
-
-            line_prefix = prefix + (branch if prefix else "")
-
-            pid_str = str(node.pid)
-            if args.show_path:
-                cmd_str = node.command
-            else:
-                cmd_str = node.comm
-            cpu_part = ""
-
-            if use_color:
-                pid_str = f"{fg(0xffffff)}{pid_str}{RESET}"
-                cmd_str = f"{RESET}{fg(0x5287d6)}{cmd_str}{RESET}"
-
-            user_str = node.user
-
-            # Select glyph style for tree branches (ASCII / UTF-8 variants)
-            if use_color:
-                user_str = f"{fg(0xaaaaaa)}{user_str}{RESET}"
-
-            if node.pid in visible_pids:
-                # Compute total CPU for entire subtree (not just this process)
-                cpu_total = compute_subtree_cpu(node, children_map)
-
-                # Decide whether to show CPU based on flags and thresholds
-                # Decide whether to show CPU (CPUVW-style)
-                show_cpu = True
-
-                if show_cpu:
-                    cpu_str = format_subtree_cpu(cpu_total)
-
-                    # Apply severity-based coloring to CPU values
-                    if use_color:
-                        if cpu_total >= 80:
-                            cpu_str = f"{fg(0xff0000)}{cpu_str}{RESET}"
-                        elif cpu_total >= 40:
-                            cpu_str = f"{fg(0xecbb00)}{cpu_str}{RESET}"
-                        else:
-                            cpu_str = f"{fg(0xaaaaaa)}{cpu_str}{RESET}"
-
-                    cpu_part = f" (CPU: {cpu_str})"
 
             pipe = glyph["pipe"]
             space = glyph["space"]
 
-            # Extend prefix for next level (pipe continues, space ends branch)
-            new_prefix = prefix + (space if is_last else pipe)
+            # ------------------------------------------
+            # BUILD PREFIX (GRID SYSTEM — FIXES ALIGNMENT)
+            # ------------------------------------------
+            prefix = ""
 
-            # Sort children according to selected key.
-            # Command sorting uses short names (comm) for human-friendly ordering.
-            sort_key = args.sort
+            for is_pipe in levels[:-1]:
+                prefix += glyph["pipe"] if is_pipe else glyph["space"]
+
+            if levels:
+                children = children_map.get(node.pid, [])
+                children = [c for c in children if c.pid in visible_pids]
+
+                is_leaf = (len(children) == 0)
+
+                if str(args.glyph_style) == "3" and is_leaf:
+                    branch = (glyph["last"] if is_last else glyph["branch"])[:-1] + glyph["leaf"] + " "
+                else:
+                    branch = glyph["last"] if is_last else glyph["branch"]
+
+                prefix += branch
+
+            # ------------------------------------------
+            # RAW VALUES
+            # ------------------------------------------
+            pid_val = node.pid
+            user_val = node.user
+            stat_val = getattr(node, "stat", "?")
+            cpu_val = getattr(node, "cpu", 0.0)
+            cmd_val = node.command if args.show_path else node.comm
+
+            # ------------------------------------------
+            # COLOR
+            # ------------------------------------------
+            pid_str = str(pid_val)
+
+            if use_color:
+                pid_txt = f"{fg(0xffffff)}{pid_str}{RESET}"
+            else:
+                pid_txt = pid_str
+
+            if use_color:
+                user_txt = f"{fg(0x777777)}{user_val}{RESET}"
+                stat_txt = f"{fg(0xffffff)}{stat_val}{RESET}"
+
+                if cpu_val >= 80:
+                    cpu_txt = f"{fg(0xff0000)}{cpu_val:.1f}%{RESET}"
+                elif cpu_val >= 40:
+                    cpu_txt = f"{fg(0xecbb00)}{cpu_val:.1f}%{RESET}"
+                else:
+                    cpu_txt = f"{fg(0xaaaaaa)}{cpu_val:.1f}%{RESET}"
+
+                cmd_txt = f"{fg(0x5287d6)}{cmd_val}{RESET}"
+            else:
+                pid_txt = str(pid_val)
+                user_txt = user_val
+                stat_txt = stat_val
+                cpu_txt = f"{cpu_val:.1f}%"
+                cmd_txt = cmd_val
+
+            # ------------------------------------------
+            # FINAL LINE
+            # ------------------------------------------
+            line = f"{prefix}{pid_txt} {user_txt} {stat_txt} (CPU: {cpu_txt}) {cmd_txt}"
+            rendered_pids.add(node.pid)
+            lines.append(line)
+
+            # ------------------------------------------
+            # CHILDREN
+            # ------------------------------------------
+            children_nodes = []
+            prune = args.prune or 0
+
+            for child in children_map.get(node.pid, []):
+
+                if child.pid not in visible_pids:
+                    continue
+
+                if prune == 0:
+                    children_nodes.append(child)
+                    continue
+
+                if prune >= 1 and is_boring(child):
+                    continue
+
+                children_nodes.append(child)
 
             children_nodes = sorted(
-                children_map.get(node.pid, []),
+                children_nodes,
                 key=lambda p: (
                     get_sort_value(p),
-                    (p.command or "").lower()  # tie-breaker for stability
+                    (p.command or "").lower()
                 ),
                 reverse=reverse
             )
 
-            # Keep only children that contribute visible content
-            # (either directly visible or leading to visible descendants)
-            filtered_children = children_nodes
-
-            # Determine if node has no children (used for leaf marker glyph)
-            is_leaf = len(filtered_children) == 0
-
-            # Diamond appears when:
-            # - no visible children
-            # - AND this is the end of a branch (last sibling OR no vertical continuation)
-            show_diamond = is_leaf
-
-            leaf_marker = glyph.get("leaf", "") if show_diamond else ""
-
-            if leaf_marker:
-                # Attach optional leaf marker for visual clarity
-                line_prefix_clean = line_prefix.rstrip()
-                prefix_with_marker = f"{line_prefix_clean}{leaf_marker} "
-            else:
-                prefix_with_marker = line_prefix
-
-
-            # Colorize tree structure separately from content
-            if use_color:
-                prefix_with_marker = f"{fg(0xffffff)}{prefix_with_marker}{RESET}"
-
-            # Detect terminal width for dynamic command truncation
-            term_width = shutil.get_terminal_size((120, 20)).columns
-
-            # Build left part
-            stat_str = node.stat if hasattr(node, "stat") else "?"
-
-            # Build base (tree + command FIRST)
-            base_part = f"{prefix_with_marker}{cmd_str}"
-
-            # Then append metadata AFTER
-            left_part = (
-                f" {pid_str:<6} "
-                f"{user_str:<8} "
-                f"{stat_str:<2} "
-                f"{cpu_part:<2} "
-            )
-
-            # Measure visible width (excluding ANSI codes)
-            left_width = visible_len(left_part)
-
-            # Remaining space determines how much of COMMAND can be shown
-            max_cmd_width = max(0, term_width - left_width)
-
-            # Truncate command safely without breaking ANSI color sequences.
-            # Visible width is enforced while preserving escape codes.
-            if not args.line_wrap:
-
-                if max_cmd_width <= 0:
-                    cmd_str = ""
-
-                # Truncate command if it exceeds available visible width
-                elif visible_len(cmd_str) > max_cmd_width:
-
-                    visible_count = 0
-                    result = ""
-
-                    idx = 0
-                    # Stop once visible character limit is reached
-                    while idx < len(cmd_str) and visible_count < max_cmd_width:
-                        char = cmd_str[idx]
-
-                        # Preserve ANSI escape sequences (do not count toward visible width)
-                        if char == "\033":
-                            seq = char
-                            idx += 1
-                            while idx < len(cmd_str) and cmd_str[idx] != "m":
-                                seq += cmd_str[idx]
-                                idx += 1
-                            if idx < len(cmd_str):
-                                seq += "m"
-                                idx += 1
-                            result += seq
-                            continue
-
-                        result += char
-                        visible_count += 1
-                        idx += 1
-
-                    cmd_str = result
-
-            # ------------------------------------------
-            # CLEAN LEAF + PREFIX LOGIC (FINAL)
-            # ------------------------------------------
-            # ------------------------------------------
-            # FINAL TREE RENDER (CLEAN)
-            # ------------------------------------------
-
-            is_leaf = len(filtered_children) == 0
-
-            branch = glyph["last"] if is_last else glyph["branch"]
-            line_prefix = prefix + branch
-
-            if is_leaf and depth > 1 and "leaf" in glyph:
-                line = f"{line_prefix}{glyph['leaf']}{left_part}{cmd_str}"
-            else:
-                line = f"{line_prefix}{left_part}{cmd_str}"
-
-            lines.append(line)
-
-            # Stop recursion once maximum depth is reached
-            if args.tree_depth is not None and depth >= args.tree_depth:
-                return
-
-            children_nodes = children_map.get(node.pid, [])
-
             for idx, child in enumerate(children_nodes):
+                child_is_last = (idx == len(children_nodes) - 1)
 
-                is_last_child = (idx == len(children_nodes) - 1)
+                # Build base prefix (structure only)
+                base_prefix = ""
+                for is_pipe in levels:
+                    base_prefix += pipe if is_pipe else space
 
-                # Build next prefix correctly
-                if is_last:
-                    new_prefix = prefix + glyph["space"]
-                else:
-                    new_prefix = prefix + glyph["pipe"]
+                render(
+                    child,
+                    levels + [not child_is_last],
+                    child_is_last,
+                    depth + 1,
+                    parent_pid_col
+                )
 
-                render(child, new_prefix, is_last_child, visited, depth + 1)
-
-        # Render each root only if it contributes visible content
         for i, root in enumerate(roots):
-            render(root, "", i == len(roots) - 1, set(), 1)
+            render(root, [], i == len(roots) - 1, 1, 0)
 
-        if args.number:
-            # Apply global output limit after full rendering
-            return lines[:args.number]
+        tree_data = build_tree_structure()
+        node_count = count_nodes(tree_data)
 
-        return lines
+        return lines, len(rendered_pids)

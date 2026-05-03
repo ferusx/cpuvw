@@ -23,15 +23,15 @@ DEFAULT_TOML = """\
 # This section contains general settings for the CPU 
 # output. 
 #
-# cpu_threshold {number}:
+# cpu_threshold {number}
 #         Sets the minimum % for CPU usage for processes
 #         to be shown.
-# cpu_state_threshold {number}:
+# cpu_state_threshold {number}
 #         Sets min % for when CPU STATE triggers HEAVY
 #         mode. I.e. a setting of 50, would trigger the
 #         HEAVY_X state at 50 CPU% rather than at 70%,
 #         which is the default limit. 
-# heavy/active/low {number}: 
+# heavy/active/low {number}
 #         Thresholds for CPU state classification (%). 
 #         These values determine when the system is 
 #         considered:
@@ -111,26 +111,26 @@ max = 10                 # Max value for procs to show
 # ---------------------------------------------------- 
 # This section contains general settings for the output.
 #
-# show_low_cpu {true|false}: 
+# show_low_cpu {true|false} 
 #         Shows processes below 'threshold' (see 'thres-
 #         hold' above).
-# show_header: 
+# show_header {true|false}
 #         Show/hide the column header for table.
-# show_stat_info {true|false}:
+# show_stat_info {true|false}
 #         Will display explanations about the STAT column
 #         below the process table.
-# hide_analysis {true|false}:
+# hide_analysis {true|false}
 #         Enable/disable analysis sections above the 
 #         table. When false, only the process table is 
 #         shown.
-# no_table {true|false}:
+# no_table {true|false}
 #         Show/hide the process table section at the
 #         bottom of the output. This will hide the ent-
 #         ire analysis section at the top. 
 # use_color {true|false}: 
 #         Applies colored output by default. There is no
 #         longer a need to use --color flag.
-# limit {number}:  
+# limit {number}
 #         Maximum number of processes to display in the
 #         table. 0 = no limit (show all eligible proc-
 #         esses). 
@@ -157,24 +157,26 @@ limit = 0                  # 0 = no limit
 # ====================================================
 
 # ----------------------------------------------------
-# show_path {true|false}:
+# show_path {true|false}
 #         Show full path in COMMAND column (table).
-# wrap_lines {true|false}: 
+# wrap_lines {true|false} 
 #         Line wrap the paths when show_path is enabled. 
 # default_sort {pid|user|cpu|thread|cmd}: 
 #         Default sorting order.
-# bottom_sort {true|false}:
+# bottom_sort {true|false}
 #         Sort the table in descending order.
 # invert_header {default,white,gray,blue,green,orange,
-#                purple,teal,maroon}: 
+#                purple,teal,maroon} 
 #         Inverts the colors in the column header 
 #         and applies a color instead of the regular 
 #         white color. 
-# show_tree_view {true|false}:
+# show_tree_view {true|false}
 #         Enable/disable tree view for processes inst-
 #         ead of table view.
 # tree_limit {number}
 #         default number of processes in tree view.
+# with_parents {true|false}
+#         Include parents in tree view.
 # ----------------------------------------------------
 
 [table]
@@ -186,30 +188,7 @@ invert_header = "default"  # Invert and set column hea-
                            # der colors.
 show_tree_view = false     # View process output in tree
 tree_limit = 20            # default number of processes
-
-# ====================================================
-# FILTER section
-# ====================================================
-# ----------------------------------------------------
-# This section manages filtering in the table's columns
-#
-# pid {number}
-#         Sorts the PID column for the specified number
-# user {username}
-#         SOrts the user column for the specified name
-# stat {abbreviation}
-#         Sorts the stat column for given abbreviation
-# cpu {float}
-#         Searches the CPU% column for processes
-#
-# ----------------------------------------------------
-
-[filter]
-pid = 0
-user = ""
-stat = ""
-cpu = 0.0
-command = ""
+with_parents = false       # Include parents in tree view
 """
 
 # -------------------------------------------------------------------------
