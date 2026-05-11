@@ -39,15 +39,62 @@ THRESHOLD_LIGHT = 1.0  # process table threshold
 # STAT_MEANINGS
 # ---------------------------------------------------------------------
 STAT_MEANINGS = {
-    "R": "Running or ready to run",
-    "S": "Sleeping (waiting for event)",
-    "D": "Waiting on I/O (uninterruptible)",
-    "Z": "Zombie process (terminated, not reaped)",
-    "T": "Stopped (job control or debug)",
 
-    "N": "Low priority (nice)",
-    "+": "Foreground process",
-    "C": "CPU-bound (actively consuming CPU)",
+    # --------------------------------------------------
+    # Primary execution states
+    # --------------------------------------------------
+    "R": "Running or ready to run — actively competing for CPU time",
+
+    "S": "Sleeping (waiting for event) — currently idle, awaiting work",
+
+    "D": "Waiting on I/O — blocked on disk or network operations",
+
+    "I": "Idle kernel thread — sleeping internal kernel worker",
+
+    # --------------------------------------------------
+    # Stopped / traced
+    # --------------------------------------------------
+    "T": "Stopped — paused or under debugging control",
+
+    "t": "Traced or debug-stopped — currently under debugger control",
+
+    # --------------------------------------------------
+    # Dead / zombie
+    # --------------------------------------------------
+    "Z": "Zombie process — terminated but not yet reaped by parent",
+
+    "X": "Dead process — terminated and awaiting final cleanup",
+
+    # --------------------------------------------------
+    # Paging / memory
+    # --------------------------------------------------
+    "W": "Paging activity — memory pages being swapped or managed",
+
+    "L": "Locked in memory — pages pinned to RAM for critical operations",
+
+    # --------------------------------------------------
+    # Scheduling priority
+    # --------------------------------------------------
+    "<": "High priority process — favored by the scheduler",
+
+    "N": "Low priority (nice) — intentionally deprioritized workload",
+
+    # --------------------------------------------------
+    # Session / threading
+    # --------------------------------------------------
+    "s": "Session leader — controlling process for a user session",
+
+    "l": "Multi-threaded process — running multiple execution threads",
+
+    # --------------------------------------------------
+    # User interaction
+    # --------------------------------------------------
+    "+": "Foreground process — interacting directly with the user",
+
+    # --------------------------------------------------
+    # Analyzer behavioral marker
+    # --------------------------------------------------
+    "C": "CPU-bound — continuously consuming CPU without waiting",
 }
 
 

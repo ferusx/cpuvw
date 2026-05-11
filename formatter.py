@@ -101,9 +101,6 @@ class ProcessFormatter:
             args:
                 Parsed CLI arguments controlling formatting behavior.
 
-            invert_headers (bool):
-                Whether the inverse colors of the column headers should be applied.
-
         Returns:
             List[str]:
                 Fully formatted lines ready for printing.
@@ -139,19 +136,6 @@ class ProcessFormatter:
             ("COMMAND", None),
         ]
 
-        # Inverted colors for the column headers
-        INVERT_HEADER_COLORS = {
-            "default": (0x000000, 0xffffff),
-            "white": (0xffffff, 0x000000),
-            "gray": (0xaaaaaa, 0x000000),
-            "blue": (0x5287d6, 0x000000),
-            "green": (0x00c900, 0x000000),
-            "purple": (0xa96aec, 0x000000),
-            "teal": (0x6da179, 0x000000),
-            "maroon": (0x6a496d, 0x000000),
-            "orange": (0xec9c00, 0x000000),
-        }
-
         parts = []
 
         for name, width in columns:
@@ -168,7 +152,7 @@ class ProcessFormatter:
         if use_color:
             header = f"{fg(0xffffff)}{header}{RESET}"
 
-        if not args.hide_header:
+        if not args.raw and not args.hide_header:
             print()
             lines.append("")
             lines.append(header)
@@ -202,24 +186,23 @@ class ProcessFormatter:
             lines.append(empty_row)
             return lines
 
+
         # List and format processes (width)
         for p in processes:
 
             # Filter out the idle kernel process unless explicitly requested
             cmd = p.command.strip().lower() if args.show_path else p.comm
 
-            total = getattr(p, "total_cpu", p.cpu)
-
             if cmd.startswith("ps ") and "-axo" in cmd:
                 continue
 
+            total = getattr(p, "total_cpu", p.cpu)
             # Raw mode bypasses all formatting for simple, script-friendly output
             if args.raw:
                 lines.append(
-                    f"{p.pid} {p.user} {p.cpu:.1f} {p.mem:.1f} {cmd}"
+                    f"{p.pid} {p.user} {p.stat} {p.cpu:.1f} {total:.1f} {p.threads} {cmd}"
                 )
                 continue
-
 
             # Apply padding BEFORE color
             pid_str = f"{p.pid:<{PID_W}}"

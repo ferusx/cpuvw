@@ -118,8 +118,9 @@ class ProcessFetcher:
                     )
                 )
 
-            except ValueError:
-                # Skip malformed lines without interrupting execution
+            except ValueError as e:
+                print(f"FAILED LINE: {line}")
+                print(f"ERROR: {e}")
                 continue
 
         return processes

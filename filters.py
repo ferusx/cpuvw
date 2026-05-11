@@ -60,14 +60,6 @@ class ProcessFilter:
             if getattr(args, "number", None) is None:
                 result = [p for p in result if not is_hidden_process(p)]
 
-        # User
-        if args.user:
-            result = [p for p in result if p.user == args.user]
-
-        # PID
-        if getattr(args, "pid", None):
-            result = [p for p in result if p.pid == args.pid]
-
         # --filter-command
         if getattr(args, "filter_command", None):
             needle = args.filter_command.lower()

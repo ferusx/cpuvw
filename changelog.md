@@ -178,3 +178,140 @@
 - Reintroduced proper child filtering pipeline with pruning
 - Standardized color handling via `use_color` checks
 - Improved separation between formatting and output layers
+
+---
+
+## [0.6.0] - 2026-05-11
+
+## Analyzer & Topology Overhaul
+
+### Major Additions
+
+- Added CPU topology awareness
+  - Physical cores and logical CPUs are now treated as separate analytical layers
+  - SMT sibling threads are grouped into real physical-core interpretations
+  - Analyzer terminology and telemetry were upgraded to reflect actual hardware structures
+
+- Added `--show-physical-core`
+  - Introduced dedicated physical-core telemetry view
+  - Added topology-aware physical utilization analysis
+  - Physical core utilization now derives from grouped logical siblings
+
+- Added multi-depth analyzer modes
+  - `--analyze`
+  - `--analyze more`
+  - `--analyze deep`
+  - Observation windows and report depth now scale cleanly with analysis mode
+
+- Added `TemporalHistory`
+  - Introduced longitudinal observation tracking across analyzer samples
+  - Added:
+    - mean CPU
+    - min/max CPU
+    - CPU delta
+    - dominant persistence
+    - workload continuity tracking
+
+- Added `--pager`
+  - Analyzer reports can now be viewed through `less -R`
+  - ANSI colors preserved
+  - Fully functional over SSH and local terminals
+  - Uses true shell pipeline execution for native UNIX pager behavior
+
+
+### Analyzer Improvements
+
+- Reworked analyzer synchronization model
+  - CPU state classification now occurs AFTER the observation window completes
+  - Eliminated stale analyzer states during active workloads
+
+- Upgraded analyzer hardware interpretation
+  - Physical cores are now the primary hardware interpretation layer
+  - Logical CPUs are now treated as advanced scheduler telemetry
+
+- Added Observation Summary section
+  - Introduced compact temporal summary metrics:
+    - mean CPU
+    - CPU range
+    - CPU delta
+    - dominant persistence
+
+- Added Temporal Observations section
+  - Analyzer now performs restrained temporal workload interpretation
+  - Added stability and fluctuation observations derived from longitudinal telemetry
+
+- Upgraded STAT interpretation system
+  - Analyzer now extracts STAT flags from both dominant source and top contributors
+  - Added support for:
+    - upper-case and lower-case BSD/Linux STAT flags
+    - scheduler and session indicators
+    - multithreading and memory-lock indicators
+  - Expanded explanations for:
+    - `I`
+    - `L`
+    - `W`
+    - `X`
+    - `s`
+    - `l`
+    - `t`
+    - `<`
+    - and others
+
+- Upgraded `--stat-info`
+  - Unified STAT descriptions with analyzer terminology
+  - Expanded visible state interpretation coverage
+
+- Reworked logical CPU presentation
+  - Analyzer now presents physical-core interpretation instead of misleading logical-thread terminology
+  - Logical CPU telemetry remains available as a deeper scheduler-level analysis layer
+
+
+### Telemetry & Core View Improvements
+
+- Reworked `--show-logical-cpu`
+  - Improved topology handling
+  - Improved inactive-core rendering
+  - Added cleaner utilization presentation
+  - Improved physical/logical distinction
+
+- Improved core activity classification
+  - Saturated
+  - Active
+  - Low
+  - Idle
+
+- Added topology-aware core grouping logic
+
+
+### UX & Output Improvements
+
+- Added pager-friendly analyzer behavior
+- Improved analyzer visual hierarchy
+- Improved section ordering and report flow
+- Improved contributor/stat synchronization
+- Reduced stale telemetry effects
+- Improved ANSI pager compatibility
+- Improved SSH analyzer usability
+
+
+### Documentation
+
+- Updated manual page
+- Expanded analyzer mode documentation
+- Expanded STAT documentation
+- Added topology-related terminology clarification
+- Added pager usage documentation
+
+
+### Internal Architecture
+
+- Introduced layered analyzer composition model
+- Improved separation between:
+  - temporal telemetry
+  - topology interpretation
+  - process attribution
+  - report rendering
+- Reduced ambiguity between logical CPUs and physical cores
+- Improved analyzer extensibility for future deep telemetry features
+
+---

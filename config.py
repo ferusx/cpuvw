@@ -6,7 +6,7 @@
 import os
 
 try:
-    import tomllib  # Python 3.11+
+    import tomllib
 except ImportError:
     import tomli as tomllib
 
@@ -23,14 +23,14 @@ DEFAULT_TOML = """\
 # This section contains general settings for the CPU 
 # output. 
 #
-# cpu_threshold {number}
+# threshold {number}
 #         Sets the minimum % for CPU usage for processes
 #         to be shown.
-# cpu_state_threshold {number}
-#         Sets min % for when CPU STATE triggers HEAVY
-#         mode. I.e. a setting of 50, would trigger the
-#         HEAVY_X state at 50 CPU% rather than at 70%,
-#         which is the default limit. 
+# cpu_threshold {number}
+#         Sets min % for when CPU STATE triggers one of
+#         the HEAVY_* modes, i.e. a setting of 50, would
+#         trigger a HEAVY_* state at 50 CPU% rather than
+#         at 70%, which is the default limit. 
 # heavy/active/low {number}
 #         Thresholds for CPU state classification (%). 
 #         These values determine when the system is 
@@ -42,9 +42,9 @@ DEFAULT_TOML = """\
 # ----------------------------------------------------
 
 [cpu]
-cpu_threshold = 1.0      # Min CPU% for procs to show
-cpu_state_threshold = 70 # Min CPU% to trigger heavy state
-heavy = 80               # Min value for HEAVY state
+threshold = 1.0          # Min CPU% for procs to show
+cpu_threshold = 70       # Min CPU% to trigger heavy state
+heavy = 70               # Min value for HEAVY state
 active = 40              # Min value for MODERATE state
 low = 20                 # Min value for LIGHT state
 
@@ -52,19 +52,27 @@ low = 20                 # Min value for LIGHT state
 # This section contains special settings that relates
 # to the CPU's logical processors.
 #
-# mode {fast|avg}:
-#         fast → instant snapshot (may appear spiky.)
-#         avg → sampled over time for smoother values.
-# interval {seconds}: 
-#         Update frequency for live sampling mode.
-# avg_duration {seconds}: 
-#         Total duration for averaged sampling
+# logical_avg {true|false}
+#         Always run in avg mode for --show-logical-cpu
+# physical_avg {true|false}
+#         Always run in avg mode for --show-physical-core
+# logical_interval {seconds}
+#         Sampling interval for --show-logical-cpu
+# physical interval {seconds}
+#         Sampling interval for --show-physical-core
+# logical_duration {seconds}
+#         Duration for --show-logical-cpu in fast mode
+# physical_duration {seconds}
+#         Duration for --show-physical-core in fast mode
 # ----------------------------------------------------
 
 [cores]
-mode = "fast"           # Display mode for logical CPUs        
-interval = 0.5          # Logical CPU update frequency
-avg_duration = 3.0      # Avg duration for ...
+logical_avg = false      # Always run in average mode (logical CPU)
+physical_avg = false     # Always run in average mode (physical core)
+logical_interval = 0.3   # Sampling interval for logical CPU
+physical_interval = 0.3  # Sampling interval for physical core
+logical_duration = 2.5   # Duration for logical in fast mode
+physical_duration = 2.5  # Duration for physical in fast mode
 
 # ====================================================
 # State display limits
@@ -165,11 +173,6 @@ limit = 0                  # 0 = no limit
 #         Default sorting order.
 # bottom_sort {true|false}
 #         Sort the table in descending order.
-# invert_header {default,white,gray,blue,green,orange,
-#                purple,teal,maroon} 
-#         Inverts the colors in the column header 
-#         and applies a color instead of the regular 
-#         white color. 
 # show_tree_view {true|false}
 #         Enable/disable tree view for processes inst-
 #         ead of table view.
@@ -184,8 +187,6 @@ show_path = false          # Show/hide full path (CMD)
 wrap_lines = false         # Line wrap long paths (CMD)
 default_sort = "cpu"       # Default sorting order
 bottom_sort = false        # Descending sort for table
-invert_header = "default"  # Invert and set column hea-
-                           # der colors.
 show_tree_view = false     # View process output in tree
 tree_limit = 20            # default number of processes
 with_parents = false       # Include parents in tree view

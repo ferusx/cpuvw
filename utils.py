@@ -9,6 +9,7 @@ import json
 import time
 import subprocess
 from typing import Optional
+import xml.etree.ElementTree as ET
 
 # Local imports
 from models import ProcessInfo, ProcessNode
@@ -680,14 +681,11 @@ def extract_unique_stats(processes):
 # Function: describe_stats
 # -------------------------------------------------------------------------------------
 def describe_stats(stat_chars):
-    lines = []
-
-    for ch in stat_chars:
-        meaning = STAT_MEANINGS.get(ch)
-        if meaning:
-            lines.append(f"{ch} → {meaning}")
-
-    return lines
+    return [
+        f"{ch} → {STAT_MEANINGS[ch]}"
+        for ch in stat_chars
+        if ch in STAT_MEANINGS
+    ]
 
 # -------------------------------------------------------------------------------------
 # Function: get_cpu_count
@@ -740,45 +738,154 @@ def read_cp_times():
 # -------------------------------------------------------------------------------------
 # Function: get_per_core_usage
 # -------------------------------------------------------------------------------------
-def get_per_core_usage():
-    def read_cp_times():
-        result = subprocess.run(
-            ["sysctl", "-n", "kern.cp_times"],
-            capture_output=True,
-            text=True
-        )
-
-        values = list(map(int, result.stdout.strip().split()))
-
-        # FreeBSD: 5 values per core
-        cores = []
-        for i in range(0, len(values), 5):
-            cores.append(values[i:i + 5])
-
-        return cores
+def get_per_core_usage(duration=1.0, interval=1.0):
 
     t1 = read_cp_times()
-    time.sleep(1.0)
-    t2 = read_cp_times()
+    samples = []
 
-    core_usages = []
+    start = time.time()
 
-    for c1, c2 in zip(t1, t2):
-        delta = [b - a for a, b in zip(c1, c2)]
-        total = sum(delta)
+    while time.time() - start < duration:
 
-        if total == 0:
-            usage = 0.0
-        else:
-            idle = delta[4]
-            usage = (1 - idle / total) * 100
+        time.sleep(interval)
+        t2 = read_cp_times()
 
-        # SAFE CLAMP (always after assignment)
-        usage = max(0.0, min(usage, 100.0))
+        core_sample = []
 
-        core_usages.append(usage)
+        for c1, c2 in zip(t1, t2):
 
-    return core_usages
+            delta = [b - a for a, b in zip(c1, c2)]
+            total = sum(delta)
+
+            if total == 0:
+                usage = 0.0
+            else:
+                idle = delta[4]
+                usage = (1 - idle / total) * 100
+
+            usage = max(0.0, min(usage, 100.0))
+
+            core_sample.append(usage)
+
+        samples.append(core_sample)
+
+        # Critical:
+        # move observation window forward
+        t1 = t2
+
+    # ------------------------------------------
+    # Safety
+    # ------------------------------------------
+    if not samples:
+        return [0.0] * len(t1)
+
+    # ------------------------------------------
+    # Average each core across all samples
+    # ------------------------------------------
+    averaged = []
+
+    for i in range(len(samples[0])):
+        avg = sum(sample[i] for sample in samples) / len(samples)
+        averaged.append(avg)
+
+    return averaged
+
+# -------------------------------------------------------------------------------------
+# Function: compute_per_core_usage
+# -------------------------------------------------------------------------------------
+def compute_per_core_usage(samples):
+    """
+    Compute averaged per-core CPU usage from pre-collected
+    cp_times telemetry snapshots.
+
+    IMPORTANT:
+        This function performs NO timing or sleeping.
+
+        It assumes the caller already collected synchronized
+        telemetry samples over time.
+
+    Args:
+        samples:
+            List of raw cp_times snapshots collected over time.
+
+            Example:
+
+                [
+                    snapshot1,
+                    snapshot2,
+                    snapshot3,
+                ]
+
+            where each snapshot contains:
+
+                [
+                    [user, nice, system, interrupt, idle],
+                    ...
+                ]
+
+    Returns:
+        List[float]:
+            Averaged CPU usage percentage per logical core.
+    """
+
+    # --------------------------------------------------
+    # Safety
+    # --------------------------------------------------
+    if len(samples) < 2:
+        return []
+
+    usage_samples = []
+
+    # --------------------------------------------------
+    # Compute deltas between consecutive snapshots
+    # --------------------------------------------------
+    for prev, curr in zip(samples, samples[1:]):
+
+        core_sample = []
+
+        for c1, c2 in zip(prev, curr):
+
+            delta = [
+                b - a
+                for a, b in zip(c1, c2)
+            ]
+
+            total = sum(delta)
+
+            if total == 0:
+                usage = 0.0
+
+            else:
+                idle = delta[4]
+
+                usage = (
+                    1 - (idle / total)
+                ) * 100
+
+            usage = max(
+                0.0,
+                min(usage, 100.0)
+            )
+
+            core_sample.append(usage)
+
+        usage_samples.append(core_sample)
+
+    # --------------------------------------------------
+    # Average all samples per core
+    # --------------------------------------------------
+    averaged = []
+
+    for i in range(len(usage_samples[0])):
+
+        avg = (
+            sum(sample[i] for sample in usage_samples)
+            / len(usage_samples)
+        )
+
+        averaged.append(avg)
+
+    return averaged
 
 # -------------------------------------------------------------------------------------
 # Function: classify_cores
@@ -811,7 +918,6 @@ def is_hidden_process(p):
     return (
             cmd == "idle"
             or cmd.startswith("[") and "idle" in cmd
-            or p.cpu < 0.1
     )
 
 def expand_with_parents(processes, all_processes):
@@ -858,7 +964,7 @@ def get_per_core_usage_avg(duration=2.0, interval=0.3):
             core_sample.append(usage)
 
         samples.append(core_sample)
-        prev = curr  # 🔥 CRITICAL
+        prev = curr  # CRITICAL
 
     # average per core
     return [
@@ -886,4 +992,111 @@ def compute_usage(prev, curr):
         core_usages.append(usage)
 
     return core_usages
+
+
+# -------------------------------------------------------------------------------------
+# Function: get_cpu_topology
+# -------------------------------------------------------------------------------------
+def get_cpu_topology():
+
+    topology = {
+        "logical_cpus": 0,
+        "physical_cores": []
+    }
+
+    try:
+
+        result = subprocess.run(
+            ["sysctl", "-n", "kern.sched.topology_spec"],
+            capture_output=True,
+            text=True
+        )
+
+        xml_output = result.stdout
+
+        root = ET.fromstring(xml_output)
+
+        # --------------------------------------------------
+        # Find all SMT groups
+        # --------------------------------------------------
+        for group in root.iter("group"):
+
+            flags = []
+
+            flags_elem = group.find("flags")
+
+            if flags_elem is not None:
+
+                for flag in flags_elem.findall("flag"):
+                    flags.append(
+                        flag.attrib.get("name", "")
+                    )
+
+            cpu_elem = group.find("cpu")
+
+            if cpu_elem is None:
+                continue
+
+            # --------------------------------------------------
+            # Skip non-leaf topology groups
+            # --------------------------------------------------
+            children = group.find("children")
+
+            if children is not None:
+                continue
+
+            cpu_text = (cpu_elem.text or "").strip()
+
+            cpus = [
+                int(x.strip())
+                for x in cpu_text.split(",")
+            ]
+
+            # --------------------------------------------------
+            # SMT sibling group
+            # --------------------------------------------------
+            if "SMT" in flags:
+
+                topology["physical_cores"].append(cpus)
+
+            # --------------------------------------------------
+            # Non-SMT groups
+            # (hybrid E-cores or single-thread cores)
+            # --------------------------------------------------
+            elif "SMT" not in flags:
+
+                for cpu in cpus:
+                    topology["physical_cores"].append([cpu])
+
+        # --------------------------------------------------
+        # Logical CPU count
+        # --------------------------------------------------
+        logical = set()
+
+        for group in topology["physical_cores"]:
+            for cpu in group:
+                logical.add(cpu)
+
+        topology["logical_cpus"] = len(logical)
+
+    except Exception:
+        pass
+
+    return topology
+
+# -------------------------------------------------------------------------------------
+# Function: debug_cpu_topology
+# -------------------------------------------------------------------------------------
+def debug_cpu_topology():
+
+    result = subprocess.run(
+        ["sysctl", "-n", "kern.sched.topology_spec"],
+        capture_output=True,
+        text=True
+    )
+
+    print(result.stdout)
+
+
+
 

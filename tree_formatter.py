@@ -5,16 +5,17 @@
 
 
 from typing import List
+import shutil
 
 
 # Local imports
 from tree_builder import ProcessTreeBuilder
 from models import ProcessInfo
-from utils import get_exec_name
+from utils import get_exec_name, visible_len
 from constants import (
     GLYPH_STYLES,
     RESET,
-    fg,
+    fg
 )
 
 # =========================================================
@@ -50,7 +51,7 @@ class ProcessTreeFormatter:
     # Method: format
     # --------------------------------------------------------------------
     @staticmethod
-    def format(processes: List[ProcessInfo],  all_processes, args, use_color: bool):
+    def format(processes, all_processes, args, use_color=False, visible_pids=None):
         """
         Render the process tree as a list of formatted strings.
 
@@ -77,45 +78,39 @@ class ProcessTreeFormatter:
             - Rendering respects depth limits and pruning rules
         """
         lines = []
-        visible_pids = {p.pid for p in processes}
         rendered_pids = set()
 
+        # ------------------------------------------
+        # Always build full tree structure
+        # ------------------------------------------
+        tree_source = all_processes if args.with_parents else processes
+
+        roots, children_map = ProcessTreeBuilder.build(tree_source)
+
+        # ------------------------------------------
+        # Expand parents if requested
+        # ------------------------------------------
         if args.with_parents:
-            roots, children_map = ProcessTreeBuilder.build(all_processes)
+            pid_map = {p.pid: p for p in all_processes}
+            expanded = set(visible_pids)
 
-            # ------------------------------------------
-            # BUILD VISIBLE SET (ONLY PLACE WE DECIDE)
-            # ------------------------------------------
-            visible_pids = {p.pid for p in processes}
+            for p in processes:
+                current = p
+                while current.ppid in pid_map:
+                    parent = pid_map[current.ppid]
+                    if parent.pid in expanded:
+                        break
+                    expanded.add(parent.pid)
+                    current = parent
 
-            if args.with_parents:
-                pid_map = {p.pid: p for p in all_processes}
-
-                expanded = set(visible_pids)
-
-                for p in processes:
-                    current = p
-                    while current.ppid in pid_map:
-                        parent = pid_map[current.ppid]
-                        if parent.pid in expanded:
-                            break
-                        expanded.add(parent.pid)
-                        current = parent
-
-                visible_pids = expanded
-        else:
-            roots, children_map = ProcessTreeBuilder.build(processes)
+            visible_pids = expanded
 
         # ------------------------------------------
-        # STRICT USER FILTER (DEFAULT)
+        # Strict filtering: roots = visible nodes
         # ------------------------------------------
-        visible_pids = {p.pid for p in processes}
-
-        if not args.with_parents:
-            roots = [p for p in processes if p.pid in visible_pids]
+        roots = [p for p in processes if p.pid in visible_pids]
 
         subtree_cache = {}
-
 
         # --------------------------------------------------------------------
         # Method: compute_subtree_cpu
@@ -353,10 +348,8 @@ class ProcessTreeFormatter:
 
                 # SAME guards as render
                 if not args.with_parents:
-                    if args.user is not None and node.user != args.user:
-                        return
                     if node.pid not in visible_pids:
-                        return
+                        return None
 
                 if args.tree_depth is not None and depth > args.tree_depth:
                     return
@@ -374,7 +367,7 @@ class ProcessTreeFormatter:
 
                     walk(child, depth + 1)
 
-            # 🚨 IMPORTANT: still loop roots, BUT visited prevents duplicates
+            # IMPORTANT: still loop roots, BUT visited prevents duplicates
             for root in roots:
                 walk(root, 1)
 
@@ -506,10 +499,8 @@ class ProcessTreeFormatter:
                     return None
 
                 if not args.with_parents:
-                    if args.user is not None and node.user != args.user:
-                        return None
                     if node.pid not in visible_pids:
-                        return None
+                        return
 
                 if args.tree_depth is not None and depth > args.tree_depth:
                     return None
@@ -556,21 +547,37 @@ class ProcessTreeFormatter:
             return total
 
         # --------------------------------------------------------------------
+        # function: render_tree_node
+        # --------------------------------------------------------------------
+        def render_tree_node(tree_node, levels, is_last, depth, parent_pid_col):
+            node = tree_node["node"]
+            children = tree_node["children"]
+
+            # existing render logic for node here
+
+            for idx, child_tree in enumerate(children):
+                child_is_last = (idx == len(children) - 1)
+
+                render_tree_node(
+                    child_tree,
+                    levels + [not child_is_last],
+                    child_is_last,
+                    depth + 1,
+                    parent_pid_col
+                )
+
+        # --------------------------------------------------------------------
         # Method: render
         # --------------------------------------------------------------------
         def render(node, levels, is_last, depth, parent_pid_col):
 
             # ------------------------------------------
-            # GUARD
+            # GUARDS
             # ------------------------------------------
-            if not args.with_parents:
-                # Only apply user filter if user was specified
-                if args.user is not None:
-                    if node.user != args.user:
-                        return
 
-                if node.pid not in visible_pids:
-                    return
+            # HARD FILTER: node must be visible
+            if node.pid not in visible_pids:
+                return
 
             # Enforce user-defined depth limit (--tree-depth)
             if args.tree_depth is not None and depth > args.tree_depth:
@@ -617,7 +624,11 @@ class ProcessTreeFormatter:
             user_val = node.user
             stat_val = getattr(node, "stat", "?")
             cpu_val = getattr(node, "cpu", 0.0)
-            cmd_val = node.command if args.show_path else node.comm
+            if args.show_path:
+                cmd_val = (node.command or "").strip("[] ").strip()
+            else:
+                cmd_val = (node.comm or "").strip("[] ").strip()
+
 
             # ------------------------------------------
             # COLOR
@@ -651,9 +662,60 @@ class ProcessTreeFormatter:
             # ------------------------------------------
             # FINAL LINE
             # ------------------------------------------
-            line = f"{prefix}{pid_txt} {user_txt} {stat_txt} (CPU: {cpu_txt}) {cmd_txt}"
-            rendered_pids.add(node.pid)
-            lines.append(line)
+
+            # Build base (everything except command)
+            base = f"{prefix}{pid_txt} {user_txt} {stat_txt} (CPU: {cpu_txt}) "
+
+            # Terminal width
+            term_width = shutil.get_terminal_size((120, 20)).columns
+
+            # IMPORTANT: visible width (ANSI-safe)
+            available = term_width - visible_len(base)
+            if available < 10:
+                available = 10
+
+            # RAW command (no ANSI)
+            raw_cmd = cmd_val
+
+            # --------------------------------------------------
+            # WRAP MODE
+            # --------------------------------------------------
+            if args.line_wrap and args.show_path:
+                # Split into chunks of 'available' width
+                chunks = [raw_cmd[i:i + available] for i in range(0, len(raw_cmd), available)]
+
+                # First line (with tree prefix)
+                first = chunks[0]
+                if use_color:
+                    first = f"{fg(0x5287d6)}{first}{RESET}"
+                line = base + first
+
+                rendered_pids.add(node.pid)
+                lines.append(line)
+
+                # Continuation lines (aligned under command start)
+                indent = " " * visible_len(base)
+                for chunk in chunks[1:]:
+                    cont = chunk
+                    if use_color:
+                        cont = f"{fg(0x5287d6)}{cont}{RESET}"
+                    lines.append(indent + cont)
+
+            # --------------------------------------------------
+            # DEFAULT (NO WRAP) — what you already had working
+            # --------------------------------------------------
+            else:
+                cmd_cut = raw_cmd[:available]
+
+                if use_color:
+                    cmd_final = f"{fg(0x5287d6)}{cmd_cut}{RESET}"
+                else:
+                    cmd_final = cmd_cut
+
+                line = base + cmd_final
+
+                rendered_pids.add(node.pid)
+                lines.append(line)
 
             # ------------------------------------------
             # CHILDREN
@@ -684,10 +746,29 @@ class ProcessTreeFormatter:
                 reverse=reverse
             )
 
-            for idx, child in enumerate(children_nodes):
+            # ------------------------------------------
+            # NEW: Filter children BEFORE iterating
+            # ------------------------------------------
+            if not args.with_parents:
+                children_nodes = [c for c in children_nodes if c.pid in visible_pids]
+
+            filtered_children = [
+                c for c in children_nodes
+                if c.pid in visible_pids
+            ]
+
+            for idx, child in enumerate(filtered_children):
+
+                # ------------------------------------------
+                # Traversal rule
+                # ------------------------------------------
+                if not args.with_parents:
+                    # Strict mode: do not traverse invisible nodes
+                    if child.pid not in visible_pids:
+                        continue
+
                 child_is_last = (idx == len(children_nodes) - 1)
 
-                # Build base prefix (structure only)
                 base_prefix = ""
                 for is_pipe in levels:
                     base_prefix += pipe if is_pipe else space

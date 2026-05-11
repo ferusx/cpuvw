@@ -7,10 +7,9 @@ import sys, os
 import argparse
 import time
 import json
-import termios
-import tty
 import select
 import subprocess
+import pydoc
 from datetime import datetime
 
 # Local imports
@@ -20,14 +19,14 @@ from fetcher import ProcessFetcher
 from tree_formatter import ProcessTreeFormatter
 from filters import ProcessFilter, ProcessSorter
 from formatter import ProcessFormatter
+from telemetry import show_physical_cores_live, show_physical_cores_fast, show_logical_cpu_fast, show_logical_cpu_live
 from cpu_analyzer import CPUAnalyzer
 from utils import (
     visible_len,
     extract_unique_stats,
     describe_stats,
-    read_cp_times,
-    get_per_core_usage,
-    expand_with_parents, print_summary,
+    expand_with_parents,
+    print_summary,
 )
 
 # ****************************************************************************
@@ -84,6 +83,7 @@ class CPUVwApp:
     def __init__(self):
         self.args = self._parse_args()
 
+
         # Validate flags and argument combinations
         self._validate_flags()
 
@@ -136,13 +136,6 @@ class CPUVwApp:
             help="Show colored output. [configurable]"
         )
         parser.add_argument(
-            '-H',
-            '--high-score',
-            action="store_true",
-            help="Show highest ever CPU usage for processes and last highest\n"
-                 "CPU usage. [configurable]"
-        )
-        parser.add_argument(
             '-d',
             '--tree-depth',
             type=int,
@@ -159,10 +152,14 @@ class CPUVwApp:
         parser.add_argument(
             '-F',
             '--core-update-frequency',
+            nargs='+',
             type=float,
+            metavar=('DURATION', 'INTERVAL'),
             default=None,
-            help="Update frequency of logical processors in live mode\n"
-                 "(--show-logical-cpu avg). [configurable]"
+            help="Telemetry sampling duration and optional sampling interval\n"
+                 "for logical and physical CPU telemetry modes.\n"
+                 "If only one value is provided, it is used as the duration.\n"
+                 "[configurable]"
         )
         parser.add_argument(
             '-g',
@@ -170,6 +167,13 @@ class CPUVwApp:
             choices=["1", "2", "3"],
             default="1",
             help="Tree glyph style: 1=classic, 2=ascii, 3=fancy. [configurable]"
+        )
+        parser.add_argument(
+            '-H',
+            '--high-score',
+            action="store_true",
+            help="Show highest ever CPU usage for processes and last highest\n"
+                 "CPU usage. [configurable]"
         )
         parser.add_argument(
             '-I',
@@ -182,10 +186,10 @@ class CPUVwApp:
             '-l',
             '--show-logical-cpu',
             nargs='?',
-            const='fast',  # ← used when flag is present without value
+            const='auto',  # ← used when flag is present without value
             default=None,  # ← flag not used at all
-            choices=['fast', 'avg'],
-            help="Show per-core CPU usage (fast or avg). [configurable]"
+            choices=['fast', 'avg', 'auto'],
+            help="Show per-logical CPU usage (fast or avg). [configurable]"
         )
         parser.add_argument(
             '-L',
@@ -219,10 +223,13 @@ class CPUVwApp:
             help="Don't show process table. [configurable]"
         )
         parser.add_argument(
-            "-p",
-            "--pid",
-            type=int,
-            help="Show only specified process ID"
+            '-p',
+            '--show-physical-core',
+            nargs='?',
+            const='auto',  # ← used when flag is present without value
+            default=None,  # ← flag not used at all
+            choices=['fast', 'avg', 'auto'],
+            help="Show per-core CPU usage (fast or avg). [configurable]"
         )
         parser.add_argument(
             '-P',
@@ -242,6 +249,12 @@ class CPUVwApp:
             '--raw',
             action="store_true",
             help="Show raw output"
+        )
+        parser.add_argument(
+            '-R',
+            '--pager',
+            action="store_true",
+            help="Pause the output when it is larger than the terminal size. [configurable] "
         )
         parser.add_argument(
             "-s",
@@ -277,14 +290,12 @@ class CPUVwApp:
             help="Show tree of all processes and their children. [configurable]"
         )
         parser.add_argument(
-            "-u",
-            "--user",
-            help="Show only processes for specified user"
-        )
-        parser.add_argument(
             '-y',
             '--analyze',
-            action="store_true",
+            nargs="?",
+            const="standard",
+            choices=["standard", "more", "deep"],
+            metavar="MODE",
             help="Runs a deeper analysis of the CPU's state and active processes \n"
                  "and reports about it"
         )
@@ -313,15 +324,233 @@ class CPUVwApp:
     def _validate_flags(self):
         args = self.args
 
+        # ------------------------------------------
+        # --filter (composite filter validation)
+        # ------------------------------------------
+        FIELD_MAP = {"pid", "user", "stat", "cpu", "thr", "cmd"}
+
+        if args.filter:
+
+            for field, value in args.filter:
+
+                # Validate field
+                if field not in FIELD_MAP:
+                    raise SystemExit(
+                        f"Invalid filter field: '{field}'. "
+                        f"Valid fields are: pid, user, stat, cpu, thr, cmd"
+                    )
+
+                # Validate value type
+                if field == "pid":
+                    if not value.isdigit():
+                        raise SystemExit("Filter 'pid' requires an integer value")
+
+                elif field == "cpu":
+                    try:
+                        float(value)
+                    except ValueError:
+                        raise SystemExit("Filter 'cpu' requires a numeric value")
+
+                elif field == "thr":
+                    if not value.isdigit():
+                        raise SystemExit("Filter 'thr' requires an integer value")
+
+        # ------------------------------------------
+        # ANALYZE
+        # ------------------------------------------
         if args.analyze:
+            if args.tree:
+                raise SystemExit("--tree cannot be used with --analyze")
+
+            if args.raw:
+                raise SystemExit("--raw cannot be used with --analyze")
+
+            if args.show_logical_cpu:
+                raise SystemExit("--show-logical-cpu cannot be used with --analyze")
+
             if args.stat_info:
-                raise SystemExit("You can't use --stat-info with --analyze")
+                raise SystemExit("--stat-info cannot be used with --analyze")
 
             if args.hide_table:
-                raise SystemExit("You can't use --no-table with --analyze")
+                raise SystemExit("--hide-table cannot be used with --analyze")
 
             if args.number:
-                raise SystemExit("You can't use --number with --analyze")
+                raise SystemExit("--number cannot be used with --analyze")
+
+            if args.high_score:
+                raise SystemExit("--high-score cannot be used with --analyze")
+
+            if args.show_path:
+                raise SystemExit("--show-path cannot be used with --analyze")
+
+            if args.cpu_state_threshold:
+                raise SystemExit("--cpu-threshold cannot be used with --analyze")
+
+            if args.table_cpu_threshold:
+                raise SystemExit("--threshold cannot be used with --analyze")
+
+            if args.line_wrap:
+                raise SystemExit("--line-wrap cannot be used with --analyze")
+
+            if args.bottom:
+                raise SystemExit("--bottom cannot be used with --analyze")
+
+            if args.filter:
+                raise SystemExit("--filter cannot be used with --analyze")
+
+            if args.core_update_frequency:
+                raise SystemExit("--core-update-frequency cannot be used with --analyze")
+
+            if args.show_low_cpu:
+                raise SystemExit("--show-low-cpu cannot be used with --analyze")
+
+            if args.hide_analysis:
+                raise SystemExit("--hide-analysis cannot be used with --analyze")
+
+            if args.hide_table:
+                raise SystemExit("--hide-table cannot be used with --analyze")
+
+            if args.hide_header:
+                raise SystemExit("--hide-header cannot be used with --analyze")
+
+        # ------------------------------------------
+        # RAW MODE CONFLICTS
+        # ------------------------------------------
+        if args.raw:
+            if args.tree:
+                raise SystemExit("--tree cannot be used with --raw")
+
+            if args.analyze:
+                raise SystemExit("--analyze cannot be used with --raw")
+
+        # ------------------------------------------
+        # LOGICAL CPU MODE (exclusive)
+        # ------------------------------------------
+        if args.show_logical_cpu:
+            forbidden = [
+                args.tree,
+                args.analyze,
+                args.raw,
+                args.stat_info,
+            ]
+            if any(forbidden):
+                raise SystemExit("--show-logical-cpu cannot be combined with other modes")
+
+        # ------------------------------------------
+        # PHYSICAL CORE MODE (exclusive)
+        # ------------------------------------------
+        if args.show_physical_core:
+            forbidden = [
+                args.tree,
+                args.analyze,
+                args.raw,
+                args.stat_info,
+            ]
+            if any(forbidden):
+                raise SystemExit("--show-physical-core cannot be combined with other modes")
+
+
+        # ------------------------------------------
+        # CORE UPDATE FREQUENCY (blocker)
+        #
+        # TO prohibit users from do nonsense input
+        # like -F 0.1 2.0.
+        # ------------------------------------------
+        if args.core_update_frequency:
+
+            values = args.core_update_frequency
+
+            if len(values) > 2:
+                raise SystemExit(
+                    "--core-update-frequency accepts at most two values"
+                )
+
+            duration = values[0]
+
+            if duration <= 0:
+                raise SystemExit(
+                    "Telemetry duration must be greater than 0"
+                )
+
+            if len(values) == 2:
+
+                interval = values[1]
+
+                if interval <= 0:
+                    raise SystemExit(
+                        "Telemetry interval must be greater than 0"
+                    )
+
+                if interval > duration:
+                    raise SystemExit(
+                        "Telemetry interval cannot exceed duration"
+                    )
+
+        # ------------------------------------------
+        # NUMERIC VALIDATION
+        # ------------------------------------------
+        if args.number is not None and args.number < 1:
+            raise SystemExit("--number must be >= 1")
+
+        if args.tree_depth is not None and args.tree_depth < 1:
+            raise SystemExit("--tree-depth must be >= 1")
+
+        if args.prune is not None and args.prune not in (0, 1, 2, 3):
+            raise SystemExit("--prune must be 0, 1, 2, or 3")
+
+        if args.table_cpu_threshold is not None and args.table_cpu_threshold < 0:
+            raise SystemExit("--threshold must be >= 0")
+
+        if args.cpu_state_threshold is not None:
+            if not (30 <= args.cpu_state_threshold <= 100):
+                raise SystemExit("--cpu-threshold must be between 30 and 100")
+
+        # ------------------------------------------
+        # LOGICAL CONSISTENCY
+        # ------------------------------------------
+        if args.line_wrap and not args.show_path:
+            raise SystemExit("--line-wrap requires --show-path")
+
+        if args.core_update_frequency and (
+                not args.show_logical_cpu and
+                not args.show_physical_core
+        ):
+            raise SystemExit("--core-update-frequency requires --show-logical-cpu")
+
+        if args.hide_analysis and args.hide_table:
+            raise SystemExit("You can only hide one section at a time")
+
+        if args.color and args.raw:
+            raise SystemExit("--raw cannot be used with --color")
+
+        # ------------------------------------------
+        # TREE - LOGICAL CONSISTENCY
+        # ------------------------------------------
+        if args.tree:
+            if args.hide_header:
+                raise SystemExit("--hide-header has no effect in --tree mode")
+
+            if args.table_cpu_threshold:
+                raise SystemExit("--threshold has no effect in --tree mode")
+
+            if args.cpu_state_threshold:
+                raise SystemExit("--cpu-threshold has no effect in --tree mode")
+
+            if args.show_low_cpu:
+                raise SystemExit("--show-low-cpu has no effect in --tree mode")
+
+        # ------------------------------------------
+        # TREE MODE VALIDATION
+        # ------------------------------------------
+        if not args.tree:
+            if args.prune is not None:
+                raise SystemExit("--prune requires --tree")
+
+            if args.with_parents:
+                raise SystemExit("--with-parents requires --tree")
+
+            if args.glyph_style != "1":
+                raise SystemExit("--glyph-style requires --tree")
 
     # -------------------------------------------------------------------------------------
     # Method: _key_pressed
@@ -358,172 +587,6 @@ class CPUVwApp:
             return "Unknown CPU"
 
 
-
-    # -------------------------------------------------------------------------------------
-    # Method: _show_cores_view
-    # -------------------------------------------------------------------------------------
-    def _show_cores_view(self, args, config):
-
-        # -------------------------
-        # MODE RESOLUTION
-        # -------------------------
-        mode = args.show_logical_cpu or config.get("cores", {}).get("mode", "fast")
-
-        if mode is None:
-            mode = "fast"
-
-        # ----------------------------------
-        # DATA COLLECTION (mode-dependent)
-        # ----------------------------------
-        if mode == "fast":
-            core_usages = get_per_core_usage()
-
-            self._render_core_grid(core_usages, args)
-            return
-
-        elif mode == "avg":
-
-            interval = (
-                args.core_update_frequency
-                if args.core_update_frequency is not None
-                else config.get("cores", {}).get("interval", 0.5)
-            )
-
-            prev = read_cp_times()
-
-            # Save terminal state
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-
-            try:
-                tty.setcbreak(fd)  # non-blocking input mode
-
-                while True:
-                    # -------- key handling --------
-                    key = self._key_pressed()
-                    if key:
-                        if key in ("q", "Q", "\x1b"):  # ESC = \x1b
-                            print()
-                            break
-
-                    # -------- sampling --------
-                    curr = read_cp_times()
-
-                    core_usages = []
-
-                    for c1, c2 in zip(prev, curr):
-                        delta = [b - a for a, b in zip(c1, c2)]
-                        total = sum(delta)
-
-                        if total == 0:
-                            usage = 0.0
-                        else:
-                            idle = delta[4]
-                            usage = (1 - idle / total) * 100
-
-                        usage = max(0.0, min(usage, 100.0))
-                        core_usages.append(usage)
-
-                    prev = curr
-
-                    os.system("clear")
-
-                    self._render_core_grid(core_usages, args)
-
-                    # -------- sleep AFTER render --------
-                    time.sleep(interval)
-
-            except KeyboardInterrupt:
-                print()
-
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    # ------------------------------------------------------------------------
-    # Method: _render_core_grid-
-    # ------------------------------------------------------------------------
-    def _render_core_grid(self, core_usages, args):
-        # --------------------------------------------------
-        # Classification
-        # --------------------------------------------------
-        saturated = sum(1 for u in core_usages if u >= 80)
-        active = sum(1 for u in core_usages if 40 <= u < 80)
-        low = sum(1 for u in core_usages if 20 <= u < 40)
-        idle = sum(1 for u in core_usages if u < 20)
-        cpu_count = len(core_usages)
-
-        print("\nCPU Core Usage:\n")
-
-        # --------------------------------------------------
-        # GRID
-        # --------------------------------------------------
-        cols = 4
-        rows = 5
-        total_slots = cols * rows
-
-        padded = core_usages + [None] * (total_slots - len(core_usages))
-
-        grid = []
-        for r in range(rows):
-            row = []
-            for c in range(cols):
-                idx = c * rows + r
-                row.append((idx, padded[idx]))
-            grid.append(row)
-
-        # --------------------------------------------------
-        # Render rows
-        # --------------------------------------------------
-        for row in grid:
-            line = ""
-
-            for idx, val in row:
-                if val is None:
-                    box = f"[C{idx:<2}        ]"
-
-                else:
-                    pct = int(round(val))
-
-                    label = f"C{idx:<2}"
-                    pct_plain = f"{pct:>3}%"
-
-                    if args.color:
-                        label_col = f"{fg(0xaaaaaa)}{label}{RESET}"
-
-                        if pct >= 80:
-                            pct_col = f"{fg(0xff0000)}{pct_plain}{RESET}"
-                        elif pct >= 40:
-                            pct_col = f"{fg(0xecbb00)}{pct_plain}{RESET}"
-                        elif pct >= 20:
-                            pct_col = f"{fg(0xffffff)}{pct_plain}{RESET}"
-                        else:
-                            pct_col = f"{fg(0x5287d6)}{pct_plain}{RESET}"
-
-                        l_bracket = f"{fg(0x777777)}[{RESET}"
-                        r_bracket = f"{fg(0x777777)}]{RESET}"
-                    else:
-                        label_col = label
-                        pct_col = pct_plain
-                        l_bracket = "["
-                        r_bracket = "]"
-
-                    box = f"{l_bracket}{label_col} {pct_col}{r_bracket}"
-
-                line += box + "  "
-
-            print(line.rstrip())
-
-        # --------------------------------------------------
-        # Summary
-        # --------------------------------------------------
-        print()
-        print(f"{saturated} {fg(0xaaaaaa)}/{RESET} {cpu_count} {fg(0xaaaaaa)}cores saturated{RESET}")
-        print(f"{fg(0xaaaaaa)}Saturated:{RESET} {saturated} {fg(0xaaaaaa)}| Active:{RESET} {active} {fg(0xaaaaaa)}| Low:{RESET} {low} | Idle: {idle}")
-        print()
-
-
-
-
     # -------------------------------------------------------------------------------------
     # Method: run()
     # -------------------------------------------------------------------------------------
@@ -545,6 +608,37 @@ class CPUVwApp:
         start_time = time.time()
 
         args = self.args
+
+        import os
+        import shlex
+        import sys
+
+        if args.pager and not os.environ.get("CPUVW_PAGER_ACTIVE"):
+            env = os.environ.copy()
+            env["CPUVW_PAGER_ACTIVE"] = "1"
+
+            filtered_args = [
+                shlex.quote(arg)
+                for arg in sys.argv[1:]
+                if arg != "--pager"
+            ]
+
+            cmd = (
+                f"{shlex.quote(sys.executable)} "
+                f"{shlex.quote(sys.argv[0])} "
+                f"{' '.join(filtered_args)} "
+                f"| less -R"
+            )
+
+            os.execvpe(
+                "sh",
+                ["sh", "-c", cmd],
+                env
+            )
+
+
+
+
 
         # High score
         use_high_schore = args.high_score
@@ -621,16 +715,83 @@ class CPUVwApp:
             args.with_parents = table_cfg.get("with_parents", False)
 
         # ------------------------------------------
+        # CONFIG [cores] SECTION
+        # ------------------------------------------
+        cores_cfg = config.get("cores", {})
+
+        if not hasattr(args, "logical_interval"):
+            args.logical_interval = cores_cfg.get(
+                "logical_interval",
+                0.3
+            )
+
+        if not hasattr(args, "physical_interval"):
+            args.physical_interval = cores_cfg.get(
+                "physical_interval",
+                0.3
+            )
+
+        if not hasattr(args, "logical_duration"):
+            args.logical_duration = cores_cfg.get(
+                "logical_duration",
+                2
+            )
+
+        if not hasattr(args, "physical_duration"):
+            args.physical_duration = cores_cfg.get(
+                "physical_duration",
+                2
+            )
+
+        # ------------------------------------------
         # ARGS.SHOW_LOGICAL_CPU
         # ------------------------------------------
+
         if args.show_logical_cpu:
-            self._show_cores_view(args, config)
+
+            mode = args.show_logical_cpu
+
+            if mode == "auto":
+
+                if cores_cfg.get("logical_avg", False):
+                    mode = "avg"
+                else:
+                    mode = "fast"
+
+            if mode == "fast":
+                show_logical_cpu_fast(args)
+
+            elif mode == "avg":
+                show_logical_cpu_live(args)
+
+            return
+
+        # ------------------------------------------
+        # ARGS.SHOW_PHYSICAL_CORE
+        # ------------------------------------------
+        if args.show_physical_core:
+
+            mode = args.show_physical_core
+
+            if mode == "auto":
+
+                if cores_cfg.get("physical_avg", False):
+                    mode = "avg"
+                else:
+                    mode = "fast"
+
+            if mode == "fast":
+                show_physical_cores_fast(args)
+
+            elif mode == "avg":
+                show_physical_cores_live(args)
+
             return
 
         args.cpu_state_threshold = (
             args.cpu_state_threshold
             if args.cpu_state_threshold is not None
-            else config.get("cpu", {}).get("cpu_state_threshold", 70)
+            else config.get("cpu", {}).get("cpu_threshold", 70)
         )
 
         args.moderate_threshold = args.cpu_state_threshold - 30
@@ -656,8 +817,11 @@ class CPUVwApp:
         # ------------------------------------------
         processes = ProcessSorter.apply(processes, args)
 
+        all_processes = ProcessFetcher().fetch(args)
+        filtered_processes = ProcessFilter().apply(all_processes, args)
 
-        all_processes = list(processes)
+        visible_pids = {p.pid for p in filtered_processes}
+
 
         def apply_filters(processes, filters):
             if not filters:
@@ -669,7 +833,7 @@ class CPUVwApp:
                 field = FIELD_MAP.get(field_key)
 
                 if not field:
-                    continue  # or raise error
+                    raise SystemExit(f"Invalid filter field: '{field}'")
 
                 if field == "pid":
                     result = [p for p in result if str(p.pid) == value]
@@ -707,9 +871,33 @@ class CPUVwApp:
         if args.tree:
 
             fetcher = ProcessFetcher()
-            all_processes = fetcher.fetch(args)
+            all_processes = fetcher.fetch(None)
 
+            # ------------------------------------------
+            # Step 1: base list
+            # ------------------------------------------
             processes = list(all_processes)
+
+            # ------------------------------------------
+            # MAP -f filters into legacy args.*
+            # ------------------------------------------
+            if getattr(args, "filter", None):
+                for field, value in args.filter:
+
+                    if field == "pid":
+                        args.filter_pid = int(value)
+
+                    elif field == "user":
+                        args.filter_user = value
+
+                    elif field == "cmd":
+                        args.filter_command = value
+
+                    elif field == "stat":
+                        args.filter_stat = value
+
+                    elif field == "cpu":
+                        args.filter_cpu = float(value)
 
             if not args.all:
                 processes = [
@@ -717,19 +905,40 @@ class CPUVwApp:
                     if not (p.pid == 11 and "idle" in (p.command or "").lower())
                 ]
 
-            processes = ProcessFilter.apply(processes, args)
+            # ------------------------------------------
+            # Step 2: APPLY FILTER (this is the truth)
+            # ------------------------------------------
+            filtered_processes = ProcessFilter.apply(processes, args)
 
-            expanded_pids = expand_with_parents(processes, all_processes)
-            processes = [p for p in all_processes if p.pid in expanded_pids]
+            # ------------------------------------------
+            # Step 3: build visible_pids from filtered
+            # ------------------------------------------
+            visible_pids = {p.pid for p in filtered_processes}
 
+            # ------------------------------------------
+            # Step 4: expand parents ONLY for visibility
+            # ------------------------------------------
+            if args.with_parents:
+                expanded_pids = expand_with_parents(filtered_processes, all_processes)
+                visible_pids = set(expanded_pids)
+
+            # ------------------------------------------
+            # Step 5: pass filtered list + visible_pids
+            # ------------------------------------------
             formatter = ProcessTreeFormatter()
+            tree_source = all_processes if args.with_parents else filtered_processes
+
             lines, node_count = formatter.format(
-                processes,
-                all_processes,
+                filtered_processes,
+                tree_source,
                 args,
-                use_color
+                use_color,
+                visible_pids=visible_pids
             )
 
+            # ------------------------------------------
+            # Step 6: limit output
+            # ------------------------------------------
             table_cfg = config.get("table", {})
 
             if args.number is not None:
@@ -743,8 +952,6 @@ class CPUVwApp:
                 print(line)
 
             print()
-
-
             print_summary(len(lines), use_color)
             return
 
@@ -792,11 +999,57 @@ class CPUVwApp:
         dominant = analysis["dominant"]
         top = analysis["top"]
         state = analysis["state"]
+        analysis_duration = 7.5
+        analysis_interval = 0.5
 
         # ==========================================
         # ANALYZE MODE (dedicated output)
         # ==========================================
         if args.analyze:
+
+            analyzer = CPUAnalyzer()
+
+            observation = analyzer.observe(
+                fetcher,
+                args,
+                duration=7.5,
+                interval=0.5,
+                mode=args.analyze,
+            )
+
+            analysis = analyzer.analyze(
+                observation["processes"],
+                args,
+                use_color=use_color,
+                core_usages=observation["core_usages"],
+            )
+
+            dominant = analysis["dominant"]
+            top = analysis["top"]
+            state = analysis["state"]
+
+            # Sort processes by CPU usage (descending)
+            sorted_procs = sorted(processes, key=lambda p: p.cpu, reverse=True)
+
+            # Exclude dominant process if present
+            dominant_pid = dominant.pid if dominant else None
+
+            visible = [
+                p for p in sorted_procs
+                if not dominant_pid or p.pid != dominant_pid
+            ][:10]  # fixed, clean limit
+
+            # --------------------------------------
+            # Generate analysis text
+            # --------------------------------------
+            report_lines = analyzer.generate_analysis(
+                analysis,
+                analysis_duration,
+                analysis_interval,
+                args,
+                core_usages=observation["core_usages"],
+                visible=visible
+            )
 
             # --------------------------------------
             # CPU STATE (Top indicator)
@@ -846,20 +1099,68 @@ class CPUVwApp:
                 left_lines.append("  ---")
 
             # --------------------------------------
+            # Build LEFT (Observation Summary)
+            # --------------------------------------
+            temporal = analysis.get("temporal_summary", {})
+
+            mean_cpu = temporal.get("mean_cpu", 0.0)
+            min_cpu  = temporal.get("min_cpu", 0.0)
+            max_cpu  = temporal.get("max_cpu", 0.0)
+            dominant_persistence = temporal.get("dominant_persistence", 0.0)
+
+            if use_color:
+                left_lines.append("")
+                left_lines.append("Observation Summary:")
+
+                # Mean CPU
+                left_lines.append(f"{fg(0xaaaaaa)}• Mean CPU: {RESET}"
+                                  f"{mean_cpu:.0f}"
+                                  f"{fg(0xaaaaaa)}%{RESET}")
+
+                # Min/max CPU
+                left_lines.append(
+                    f"{fg(0xaaaaaa)}• CPU range: min:{RESET} "
+                    f"{min_cpu:.0f}"
+                    f"{fg(0xaaaaaa)}{RESET}"
+                    f"{fg(0xaaaaaa)}% → max:{RESET} "
+                    f"{max_cpu:.0f}"
+                    f"{fg(0xaaaaaa)}%{RESET}"
+                )
+                left_lines.append(
+                    f"{fg(0xaaaaaa)}• Dominant persistence: {RESET}"
+                    f"{dominant_persistence:.0f}"
+                    f"{fg(0xaaaaaa)}%{RESET} "
+                    f"{fg(0xaaaaaa)}(over {RESET}"
+                    f"{analysis_duration:.1f}"
+                    f"{fg(0xaaaaaa)}s{RESET})"
+                )
+            else:
+                left_lines.append("")
+                left_lines.append("Observation Summary:")
+
+                left_lines.append(f"• Mean CPU: {mean_cpu:.0f}%")
+                left_lines.append(
+                    f"• CPU range: min: {min_cpu:.0f}% → max: {max_cpu:.0f}%"
+                )
+                left_lines.append(
+                    f"• Dominant persistence: "
+                    f"{dominant_persistence:.0f}% "
+                    f"(over {analysis_duration:.1f}s)"
+                )
+
+            # --------------------------------------
             # Build RIGHT (Top contributors)
             # --------------------------------------
             right_lines = []
 
-            # Sort processes by CPU usage (descending)
-            sorted_procs = sorted(processes, key=lambda p: p.cpu, reverse=True)
+            ## PREVIOUS POSITION FOR "visible"
 
-            # Exclude dominant process if present
-            dominant_pid = dominant.pid if dominant else None
+            stat_processes = []
 
-            visible = [
-                p for p in sorted_procs
-                if not dominant_pid or p.pid != dominant_pid
-            ][:10]  # fixed, clean limit
+            if dominant:
+                stat_processes.append(dominant)
+
+            stat_processes.extend(visible)
 
             # Header
             if use_color:
@@ -890,12 +1191,6 @@ class CPUVwApp:
             # --------------------------------------
             LEFT_W = 50
 
-            # Use color theme
-            if use_color:
-                print(f"{BOLD}{fg(0xffffff)}Activity Overview:\n{RESET}")
-            else:
-                print("Activity Overview:\n")
-
             rows = max(len(left_lines), len(right_lines))
 
             for i in range(rows):
@@ -914,13 +1209,10 @@ class CPUVwApp:
             else:
                 print("\nSystem Analysis:")
 
-            # --------------------------------------
-            # Generate analysis text
-            # --------------------------------------
-            report_lines = analyzer.generate_analysis(analysis, args)
+            report_text = "\n".join(report_lines)
 
-            for line in report_lines:
-                print(line.rstrip())
+            #for line in report_lines:
+            print(report_text.rstrip())
 
             # Only add spacing when header is hidden AND table will follow
             if args.hide_header and not args.hide_table:
@@ -957,7 +1249,7 @@ class CPUVwApp:
         threshold = (
             args.table_cpu_threshold
             if args.table_cpu_threshold is not None
-            else config.get("cpu", {}).get("cpu_threshold", 1.0)
+            else config.get("cpu", {}).get("threshold", 1.0)
         )
 
         show_low_cpu = args.show_low_cpu if hasattr(args, "show_low_cpu") else False
@@ -1406,7 +1698,7 @@ class CPUVwApp:
             threshold = (
                 args.table_cpu_threshold
                 if args.table_cpu_threshold is not None
-                else config.get("cpu", {}).get("cpu_threshold", 1.0)
+                else config.get("cpu", {}).get("threshold", 1.0)
             )
 
             if args.number is not None:
@@ -1420,7 +1712,65 @@ class CPUVwApp:
             # Collect unique stat flags
             stat_chars = sorted(
                 extract_unique_stats(active),
-                key=lambda x: ["R", "S", "D", "N", "C", "+"].index(x) if x in ["R", "S", "D", "N", "C", "+"] else 99
+                key=lambda x: [
+                    # --------------------------------------------------
+                    # Primary execution states
+                    # --------------------------------------------------
+                    "R",
+                    "S",
+                    "D",
+                    "I",
+
+                    # --------------------------------------------------
+                    # Stopped / traced
+                    # --------------------------------------------------
+                    "T",
+                    "t",
+
+                    # --------------------------------------------------
+                    # Dead / zombie
+                    # --------------------------------------------------
+                    "Z",
+                    "X",
+
+                    # --------------------------------------------------
+                    # Paging
+                    # --------------------------------------------------
+                    "W",
+
+                    # --------------------------------------------------
+                    # Scheduling priority
+                    # --------------------------------------------------
+                    "<",
+                    "N",
+
+                    # --------------------------------------------------
+                    # Memory / threading
+                    # --------------------------------------------------
+                    "L",
+                    "l",
+
+                    # --------------------------------------------------
+                    # Session / interaction
+                    # --------------------------------------------------
+                    "s",
+                    "+",
+
+                    # --------------------------------------------------
+                    # Behavioral marker
+                    # --------------------------------------------------
+                    "C",
+                ].index(x)
+                if x in [
+                    "R", "S", "D", "I",
+                    "T", "t",
+                    "Z", "X",
+                    "W",
+                    "<", "N",
+                    "L", "l",
+                    "s", "+",
+                    "C",
+                ] else 99
             )
 
             if stat_chars:
@@ -1449,7 +1799,7 @@ class CPUVwApp:
         if use_color:  # Use color theme
             now = datetime.now().astimezone()
             print(f"\nCPUVw was executed at: "
-                + f"{fg(+0xaaaaaa) + now.strftime("%a %b %d %H:%M:%S %Z %Y")}"
+                + f"{fg(+0xaaaaaa) + now.strftime('%a %b %d %H:%M:%S %Z %Y')}"
             )
 
         # ------------------------------------------
