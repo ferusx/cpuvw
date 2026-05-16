@@ -1,0 +1,8 @@
+Tip: CPUVw becomes more expressive under sustained workload activity.
+
+Tip: Try --analyze deep to perform an extensive analysis on your machine's current state.
+
+Tip: Use --show-physical-core avg to inspect physical core workload in real time.
+
+Tip: Use --tree to display running processes in parent-child hierarchy form.
+

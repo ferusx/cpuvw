@@ -441,8 +441,6 @@ def show_physical_cores_fast(args):
         duration = args.physical_duration
         interval = args.physical_interval
 
-    print(f"Interval: {interval}")
-
     core_data = get_physical_core_usage(
         duration=duration,
         interval=interval,

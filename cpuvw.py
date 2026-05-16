@@ -3,17 +3,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Markus Johnsson
 
-import sys, os
+import os
+import shlex
+import sys
 import argparse
 import time
 import json
 import select
 import subprocess
-import pydoc
 from datetime import datetime
 
 # Local imports
-from constants import RESET, UNDERLINE, BOLD, fg
+from constants import RESET, UNDERLINE, BOLD, fg, STAT_MEANINGS
 from config import load_config, save_config_copy
 from fetcher import ProcessFetcher
 from tree_formatter import ProcessTreeFormatter
@@ -26,8 +27,10 @@ from utils import (
     extract_unique_stats,
     describe_stats,
     expand_with_parents,
-    print_summary,
+    print_summary, get_cpu_topology,
 )
+from random_tip import random_idle_tip, random_tip
+
 
 # ****************************************************************************
 # Class: CustomArgumentParser
@@ -223,6 +226,12 @@ class CPUVwApp:
             help="Don't show process table. [configurable]"
         )
         parser.add_argument(
+            '--hide-tips',
+            action="store_true",
+            default=None,
+            help="Hides educational tips. [configurable]"
+        )
+        parser.add_argument(
             '-p',
             '--show-physical-core',
             nargs='?',
@@ -252,9 +261,9 @@ class CPUVwApp:
         )
         parser.add_argument(
             '-R',
-            '--pager',
+            '--no-pager',
             action="store_true",
-            help="Pause the output when it is larger than the terminal size. [configurable] "
+            help="Do NOT pause the output while running the --analyze option"
         )
         parser.add_argument(
             "-s",
@@ -367,9 +376,6 @@ class CPUVwApp:
 
             if args.show_logical_cpu:
                 raise SystemExit("--show-logical-cpu cannot be used with --analyze")
-
-            if args.stat_info:
-                raise SystemExit("--stat-info cannot be used with --analyze")
 
             if args.hide_table:
                 raise SystemExit("--hide-table cannot be used with --analyze")
@@ -523,6 +529,9 @@ class CPUVwApp:
         if args.color and args.raw:
             raise SystemExit("--raw cannot be used with --color")
 
+        if args.no_pager and not args.analyze:
+            raise SystemExit("--no-pager can only be used with --analyze")
+
         # ------------------------------------------
         # TREE - LOGICAL CONSISTENCY
         # ------------------------------------------
@@ -551,6 +560,126 @@ class CPUVwApp:
 
             if args.glyph_style != "1":
                 raise SystemExit("--glyph-style requires --tree")
+
+
+    def build_stat_analysis(
+            self,
+            processes,
+            args,
+            config,
+            use_color=True
+    ):
+
+        print()
+        right_lines = []
+
+        if use_color:  # Use color theme
+            right_lines.append(f"{fg(0xaaaaaa)}STAT Analysis:{RESET}")
+        else:
+            right_lines.append("STAT Analysis:")
+
+        if args.number is not None:
+            # When user forces output, analyze visible processes instead
+            active = processes
+        else:
+            active = [p for p in processes if p.stat.strip()]
+
+        def describe_stat_chars(stat_chars):
+
+            if use_color:
+                return [
+                    f"{fg(0xffffff)}{ch}{RESET}"
+                    f"{fg(0xaaaaaa)} → {STAT_MEANINGS[ch]}{RESET}"
+                    for ch in stat_chars
+                    if ch in STAT_MEANINGS
+                ]
+
+            else:
+                return [
+                    f"{ch} → {STAT_MEANINGS[ch]}"
+                    for ch in stat_chars
+                    if ch in STAT_MEANINGS
+                ]
+
+        # Collect unique stat flags
+        stat_chars = sorted(
+            extract_unique_stats(active),
+            key=lambda x: [
+                # --------------------------------------------------
+                # Primary execution states
+                # --------------------------------------------------
+                "R",
+                "S",
+                "D",
+                "I",
+
+                # --------------------------------------------------
+                # Stopped / traced
+                # --------------------------------------------------
+                "T",
+                "t",
+
+                # --------------------------------------------------
+                # Dead / zombie
+                # --------------------------------------------------
+                "Z",
+                "X",
+
+                # --------------------------------------------------
+                # Paging
+                # --------------------------------------------------
+                "W",
+
+                # --------------------------------------------------
+                # Scheduling priority
+                # --------------------------------------------------
+                "<",
+                "N",
+
+                # --------------------------------------------------
+                # Memory / threading
+                # --------------------------------------------------
+                "L",
+                "l",
+
+                # --------------------------------------------------
+                # Session / interaction
+                # --------------------------------------------------
+                "s",
+                "+",
+
+                # --------------------------------------------------
+                # Behavioral marker
+                # --------------------------------------------------
+                "C",
+            ].index(x)
+            if x in [
+                "R", "S", "D", "I",
+                "T", "t",
+                "Z", "X",
+                "W",
+                "<", "N",
+                "L", "l",
+                "s", "+",
+                "C",
+            ] else 99
+        )
+
+        if stat_chars:
+            right_lines.append(f"• Observed states: {', '.join(stat_chars)}")
+
+            right_lines.append("")  # spacer
+
+            # Explain each
+            explanations = describe_stat_chars(stat_chars)
+            for line in explanations:
+                right_lines.append(line)
+
+        else:
+            right_lines.append("• No significant state activity detected")
+
+        return right_lines
+
 
     # -------------------------------------------------------------------------------------
     # Method: _key_pressed
@@ -609,11 +738,9 @@ class CPUVwApp:
 
         args = self.args
 
-        import os
-        import shlex
-        import sys
 
-        if args.pager and not os.environ.get("CPUVW_PAGER_ACTIVE"):
+
+        if (args.analyze and not args.no_pager) and not os.environ.get("CPUVW_PAGER_ACTIVE"):
             env = os.environ.copy()
             env["CPUVW_PAGER_ACTIVE"] = "1"
 
@@ -635,9 +762,6 @@ class CPUVwApp:
                 ["sh", "-c", cmd],
                 env
             )
-
-
-
 
 
         # High score
@@ -685,6 +809,10 @@ class CPUVwApp:
 
         if args.hide_table is None:
             args.hide_table = config.get("output", {}).get("no_table", False)
+
+        if args.hide_tips is None:
+            args.hide_tips = config.get("output", {}).get("hide_tips", False)
+
 
         # ------------------------------------------
         # CONFIG [table] SECTION
@@ -1001,6 +1129,7 @@ class CPUVwApp:
         state = analysis["state"]
         analysis_duration = 7.5
         analysis_interval = 0.5
+        tips_enabled = not config.get("output", {}).get("hide_tips", False)
 
         # ==========================================
         # ANALYZE MODE (dedicated output)
@@ -1009,20 +1138,38 @@ class CPUVwApp:
 
             analyzer = CPUAnalyzer()
 
+            if args.analyze == "standard":
+                observation_duration = 5  # 7.5 seconds (default)
+
+            elif args.analyze == "more":
+                observation_duration = 10  # 15 seconds (default)
+
+            elif args.analyze == "deep":
+                observation_duration = 15  # 30 seconds (default)
+
+            else:
+                observation_duration = 7.5
+
+            analysis_duration = observation_duration
+
             observation = analyzer.observe(
                 fetcher,
                 args,
-                duration=7.5,
+                duration=observation_duration,
                 interval=0.5,
                 mode=args.analyze,
+                tips_enabled=tips_enabled,
             )
+
 
             analysis = analyzer.analyze(
                 observation["processes"],
                 args,
                 use_color=use_color,
                 core_usages=observation["core_usages"],
+                temporal_summary=observation.get("temporal_summary")
             )
+
 
             dominant = analysis["dominant"]
             top = analysis["top"]
@@ -1077,21 +1224,43 @@ class CPUVwApp:
             # --------------------------------------
             left_lines = []
 
+            topology = get_cpu_topology()
+
+            physical_core_count = len(
+                topology["physical_cores"]
+            )
+
+            dominant_system_cpu = (
+                    dominant.cpu / physical_core_count
+            )
+
             if dominant:
                 # Use color theme
                 if use_color:
-                    left_lines.append(f"{fg(0x777777)}Dominant Source:{RESET}")
+                    left_lines.append(f"Dominant Source:")
                     left_lines.append(
-                        f"{fg(0xaaaaaa)}• {RESET}{fg(0x777777)}{dominant.comm}{RESET} "
-                        f"{dominant.cpu:.1f}% "
-                        f"{fg(0xaaaaaa)}{dominant.stat} {RESET}"
-                        f"{dominant.threads}{fg(0xaaaaaa)}Thr{RESET}"
+                        f"{fg(0xaaaaaa)}• {RESET}"
+                        f"{fg(0x5287d6)}{dominant.comm}{RESET} "
+                        f"{dominant.cpu} "
+                        f"{dominant.stat} {dominant.threads}"
+                        f"{fg(0xaaaaaa)}Thr{RESET}"
+                    )
+                    left_lines.append(
+                        f"{fg(0xaaaaaa)}  └─ {RESET}"
+                        f"{dominant_system_cpu:.1f}"
+                        f"{fg(0xaaaaaa)}% system CPU usage{RESET}"
                     )
                     left_lines.append(f"  {fg(0xaaaaaa)}└─ {RESET}{analysis['dominant_desc']}")
+
+                # No colors
                 else:
                     left_lines.append("Dominant Source:")
                     left_lines.append(
-                        f"• {dominant.comm} {dominant.cpu:.1f}% {dominant.stat} {dominant.threads}Thr"
+                        f"• {dominant.comm} {dominant.cpu} {dominant.stat} {dominant.threads}Thr"
+                    )
+                    left_lines.append(
+                        f"  └─ {dominant_system_cpu:.1f}% system CPU usage "
+                    #    f"({dominant.cpu:.1f}% cumulative)"
                     )
                     left_lines.append(f"  └─ {analysis['dominant_desc']}")
             else:
@@ -1102,14 +1271,23 @@ class CPUVwApp:
             # Build LEFT (Observation Summary)
             # --------------------------------------
             temporal = analysis.get("temporal_summary", {})
-
             mean_cpu = temporal.get("mean_cpu", 0.0)
             min_cpu  = temporal.get("min_cpu", 0.0)
             max_cpu  = temporal.get("max_cpu", 0.0)
             dominant_persistence = temporal.get("dominant_persistence", 0.0)
+            logical_active = temporal.get(
+                "logical_active_count",
+                0
+            )
 
+            logical_total = temporal.get(
+                "logical_total_count",
+                0
+            )
+
+            left_lines.append("")
+            # Use colors
             if use_color:
-                left_lines.append("")
                 left_lines.append("Observation Summary:")
 
                 # Mean CPU
@@ -1126,27 +1304,114 @@ class CPUVwApp:
                     f"{max_cpu:.0f}"
                     f"{fg(0xaaaaaa)}%{RESET}"
                 )
-                left_lines.append(
-                    f"{fg(0xaaaaaa)}• Dominant persistence: {RESET}"
-                    f"{dominant_persistence:.0f}"
-                    f"{fg(0xaaaaaa)}%{RESET} "
-                    f"{fg(0xaaaaaa)}(over {RESET}"
-                    f"{analysis_duration:.1f}"
-                    f"{fg(0xaaaaaa)}s{RESET})"
-                )
+                # Dominant persistence
+                if args.analyze != "standard":
+                    left_lines.append(
+                        f"{fg(0xaaaaaa)}• Dominant persistence: {RESET}"
+                        f"{dominant_persistence:.0f}"
+                        f"{fg(0xaaaaaa)}%{RESET} "
+                        f"{fg(0xaaaaaa)}(over {RESET}"
+                        f"{observation_duration:.1f}"
+                        f"{fg(0xaaaaaa)}s{RESET})"
+                    )
+                else:
+                    left_lines.append(
+                        f"{fg(0xaaaaaa)}• Dominant persistence: {RESET}"
+                        f"{dominant_persistence:.0f}"
+                        f"{fg(0xaaaaaa)}%{RESET} "
+                        f"{fg(0xaaaaaa)}(over {RESET}"
+                        f"{fg(0xffffff)}{analysis_duration}{RESET}"
+                        f"{fg(0xaaaaaa)}s{RESET}"
+                        f"{fg(0xaaaaaa)}s{RESET})"
+                    )
+                # Contributor stability
+                if args.analyze == "deep":
+                    left_lines.append(
+                        f"{fg(0xaaaaaa)}• Contributor stability:{RESET} "
+                        f"{analysis['contributor_stability']:.0f}"
+                        f"{fg(0xaaaaaa)}%{RESET}"
+                    )
+
+                    # Consistency score
+                    if analysis['consistency_score'] >= 80:
+                        consistency_label = f"HIGH"
+
+                    elif analysis['consistency_score'] >= 50:
+                        consistency_label = f"MODERATE"
+
+                    else:
+                        consistency_label = f"LOW"
+
+                    # Observation consistency
+                    left_lines.append(
+                        f"{fg(0xaaaaaa)}• Observation consistency:{RESET} "
+                        f"{consistency_label} "
+                        f"({analysis['consistency_score']:.0f}"
+                        f"{fg(0xaaaaaa)}%{RESET})"
+                    )
+
+                    # logical CPUs activity
+                    left_lines.append(
+                        f"{fg(0xaaaaaa)}• Logical activity: {RESET}"
+                        f"{logical_active:.0f} "
+                        f"{fg(0xaaaaaa)}/ {RESET}"
+                        f"{logical_total:.0f} "
+                        f"{fg(0xaaaaaa)}CPUs{RESET}"
+                    )
+
+            # No colors
             else:
-                left_lines.append("")
                 left_lines.append("Observation Summary:")
 
+                # Mean CPU
                 left_lines.append(f"• Mean CPU: {mean_cpu:.0f}%")
+
+                # Min/max CPU
                 left_lines.append(
                     f"• CPU range: min: {min_cpu:.0f}% → max: {max_cpu:.0f}%"
                 )
-                left_lines.append(
-                    f"• Dominant persistence: "
-                    f"{dominant_persistence:.0f}% "
-                    f"(over {analysis_duration:.1f}s)"
-                )
+                # Dominant persistence
+                if args.analyze != "standard":
+                    left_lines.append(
+                        f"• Dominant persistence: "
+                        f"{dominant_persistence:.0f}% "
+                        f"(over {observation_duration:.1f}s)"
+                    )
+                else:
+                    left_lines.append(
+                        f"• Dominant persistence: "
+                        f"{dominant_persistence:.0f}% "
+                        f"(over {analysis_duration}s)"
+                    )
+
+                # Contributor stability
+                if args.analyze == "deep":
+                    left_lines.append(
+                        f"• Contributor stability: "
+                        f"{analysis['contributor_stability']:.0f}%"
+                    )
+
+                    # Consistency score
+                    if analysis['consistency_score'] >= 80:
+                        consistency_label = "HIGH"
+
+                    elif analysis['consistency_score'] >= 50:
+                        consistency_label = "MODERATE"
+
+                    else:
+                        consistency_label = "LOW"
+
+                    # Observation consistency
+                    left_lines.append(
+                        f"• Observation consistency: "
+                        f"{consistency_label} "
+                        f"({analysis['consistency_score']:.0f}%)"
+                    )
+
+                    # logical CPUs activity
+                    left_lines.append(
+                        f"• Logical activity: {logical_active:.0f} / {logical_total:.0f} CPUs"
+                    )
 
             # --------------------------------------
             # Build RIGHT (Top contributors)
@@ -1164,40 +1429,112 @@ class CPUVwApp:
 
             # Header
             if use_color:
-                title = "Top contributor:" if len(visible) == 1 else "Top contributors:"
-                right_lines.append(f"{fg(0x777777)}{title}{RESET}")
+
+                title = (
+                    "Top contributor:"
+                    if len(visible) == 1
+                    else "Top contributors:"
+                )
+
+                right_lines.append(title)
+
+                # IMPORTANT:
+                # Insert spacer row on LEFT side so header
+                # aligns below the title instead of beside
+                # the long cumulative CPU line.
+
+                header_cmd = "COMMAND"[:12].ljust(12)
+                header_pid = "PID".rjust(8)
+                header_stat = "STAT".ljust(4)
+                header_sys = "SYS%".rjust(4)
+                header_cpu = "CPU%".rjust(4)
+
+                header_line = (
+                    f""
+                    f"{fg(0xffffff)}{header_cmd}{RESET}    "
+                    f"{header_pid}    "
+                    f"{fg(0xaaaaaa)}{header_stat}{RESET}  "
+                    f"{header_cpu}   "
+                    f"{fg(0xaaaaaa)}{header_sys}{RESET}"
+                )
+
+                right_lines.append(header_line)
+
             else:
-                right_lines.append("Top contributor:" if len(visible) == 1 else "Top contributors:")
+
+                title = (
+                    "Top contributor:"
+                    if len(visible) == 1
+                    else "Top contributors:"
+                )
+
+                right_lines.append(title)
+
+                # IMPORTANT:
+                # Same spacer row for non-color mode.
+
+                header_cmd = "COMMAND"[:12].ljust(12)
+                header_pid = "PID".rjust(8)
+                header_stat = "STAT".ljust(4)
+                header_sys = "SYS%".rjust(4)
+                header_cpu = "CPU%".rjust(4)
+
+                header_line = (
+                    f""
+                    f"{header_cmd}    "
+                    f"{header_pid}    "
+                    f"{header_stat}  "
+                    f"{header_cpu}   "
+                    f"{header_sys}"
+                )
+
+                right_lines.append(header_line)
 
             # Rows
             for p in visible:
                 cmd = p.comm[:12].ljust(12)
                 pid = str(p.pid).rjust(8)
                 stat = p.stat.ljust(4)
+                system_cpu_value = (
+                        p.cpu / physical_core_count
+                )
 
-                if use_color:
-                    cpu = f"{fg(0xaaaaaa)}{p.cpu:.0f}%{RESET}".rjust(4)
-                    bullet = f"{fg(0xaaaaaa)}• {RESET}"
-                    stat_col = f"{fg(0xaaaaaa)}{stat}{RESET}"
+                system_cpu = f"{system_cpu_value:.1f}%"
+
+
+                cpu = f"{p.cpu:.0f}%".rjust(4)
+                bullet = "• "
+                stat_col = stat
+
+                if args.color:
+                    right_lines.append(f"{fg(0x5287d6)}{bullet}{cmd}{RESET}  {pid}    {fg(0xaaaaaa)}{stat_col}{RESET}"
+                                       f"  {cpu}   {fg(0xaaaaaa)}{system_cpu}{RESET}")
                 else:
-                    cpu = f"{p.cpu:.0f}%".rjust(4)
-                    bullet = "• "
-                    stat_col = stat
-
-                right_lines.append(f"{bullet}{cmd}  {pid}    {stat_col}  {cpu}")
+                    right_lines.append(f"{bullet}{cmd}  {pid}    {stat_col}  {cpu}   {system_cpu}")
 
             # --------------------------------------
             # Print side-by-side
             # --------------------------------------
-            LEFT_W = 50
+            LEFT_W = 55
 
             rows = max(len(left_lines), len(right_lines))
 
             for i in range(rows):
-                left = left_lines[i] if i < len(left_lines) else ""
-                right = right_lines[i] if i < len(right_lines) else ""
+
+                left = (
+                    left_lines[i]
+                    if i < len(left_lines)
+                    else ""
+                )
+
+                right = (
+                    right_lines[i]
+                    if i < len(right_lines)
+                    else ""
+                )
 
                 padding = LEFT_W - visible_len(left)
+
                 if padding < 0:
                     padding = 0
 
@@ -1205,9 +1542,9 @@ class CPUVwApp:
 
             # Use color theme
             if use_color:
-                print(f"\n{BOLD}{fg(0xffffff)}System Analysis:{RESET}")
+                print(f"\n{BOLD}{fg(0xffffff)}System Analysis{RESET}")
             else:
-                print("\nSystem Analysis:")
+                print("\nSystem Analysis")
 
             report_text = "\n".join(report_lines)
 
@@ -1219,7 +1556,32 @@ class CPUVwApp:
                 print()
 
             print()
+            # ------------------------------------------
+            # STAT INFO (Special usage w. analyze)
+            # ------------------------------------------
+            if args.stat_info and args.analyze:
+
+                lines = self.build_stat_analysis(
+                    stat_processes,
+                    args,
+                    config,
+                    use_color=use_color
+                )
+
+                for line in lines:
+                    if use_color:
+                        print(f"{fg(0xaaaaaa)}{line.rstrip()}{RESET}")
+                    else:
+                        print(line.rstrip())
+
+                return
+
             return
+
+
+
+
+
 
         # --- Load previous run data ---
         config_path = os.path.expanduser("~/.config/cpuvw/scores.json")
@@ -1683,111 +2045,44 @@ class CPUVwApp:
                 print(line.rstrip())
 
         # ------------------------------------------
-        # STAT INFO SECTION
+        # STAT INFO SECTION (General usage)
         # ------------------------------------------
-        if args.stat_info:
-            print()
-            right_lines = []
+        if args.stat_info and not args.analyze:
 
-            if use_color:  # Use color theme
-                right_lines.append(f"{fg(0xaaaaaa)}STAT Analysis:{RESET}")
-            else:
-                right_lines.append("STAT Analysis:")
-
-            # Active processes (reuse same threshold logic later if needed)
-            threshold = (
-                args.table_cpu_threshold
-                if args.table_cpu_threshold is not None
-                else config.get("cpu", {}).get("threshold", 1.0)
+            lines = self.build_stat_analysis(
+                processes,
+                args,
+                config,
+                use_color=use_color
             )
 
-            if args.number is not None:
-                # When user forces output, analyze visible processes instead
-                active = processes
-            else:
-                active = [p for p in processes if p.cpu >= threshold]
-
-            right_lines.append(f"• {len(active)} active processes detected")
-
-            # Collect unique stat flags
-            stat_chars = sorted(
-                extract_unique_stats(active),
-                key=lambda x: [
-                    # --------------------------------------------------
-                    # Primary execution states
-                    # --------------------------------------------------
-                    "R",
-                    "S",
-                    "D",
-                    "I",
-
-                    # --------------------------------------------------
-                    # Stopped / traced
-                    # --------------------------------------------------
-                    "T",
-                    "t",
-
-                    # --------------------------------------------------
-                    # Dead / zombie
-                    # --------------------------------------------------
-                    "Z",
-                    "X",
-
-                    # --------------------------------------------------
-                    # Paging
-                    # --------------------------------------------------
-                    "W",
-
-                    # --------------------------------------------------
-                    # Scheduling priority
-                    # --------------------------------------------------
-                    "<",
-                    "N",
-
-                    # --------------------------------------------------
-                    # Memory / threading
-                    # --------------------------------------------------
-                    "L",
-                    "l",
-
-                    # --------------------------------------------------
-                    # Session / interaction
-                    # --------------------------------------------------
-                    "s",
-                    "+",
-
-                    # --------------------------------------------------
-                    # Behavioral marker
-                    # --------------------------------------------------
-                    "C",
-                ].index(x)
-                if x in [
-                    "R", "S", "D", "I",
-                    "T", "t",
-                    "Z", "X",
-                    "W",
-                    "<", "N",
-                    "L", "l",
-                    "s", "+",
-                    "C",
-                ] else 99
-            )
-
-            if stat_chars:
-                right_lines.append(f"• Observed states: {', '.join(stat_chars)}")
-
-                right_lines.append("")  # spacer
-
-                # Explain each
-                explanations = describe_stats(stat_chars)
-                for line in explanations:
-                    right_lines.append(line)
-
-            else:
-                right_lines.append("• No significant state activity detected")
-
-            for line in right_lines:
+            for line in lines:
                 print(line.rstrip())
+
+        # ------------------------------------------
+        # RANDOM TIP FOR IDLE
+        # ------------------------------------------
+        if state == "IDLE":
+            if not args.hide_tips:
+                tip = random_idle_tip()
+
+                print()
+
+                if args.color:
+                    print(f"{fg(0x5287d6)}{tip}{RESET}")
+                else:
+                    print(tip)
+
+        if state != "IDLE":
+            if not args.hide_tips:
+                tip = random_tip()
+
+                print()
+
+                if args.color:
+                    print(f"{fg(0x5287d6)}{tip}{RESET}")
+                else:
+                    print(tip)
 
         ## ------------------------------------------
         ## Show when CPUVw was executed at bottom

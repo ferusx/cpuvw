@@ -8,6 +8,7 @@ import sys
 
 # Local imports
 from constants import RESET, BOLD, fg, STAT_MEANINGS
+from random_tip import random_tip
 from utils import (
     extract_unique_stats,
     get_cpu_count,
@@ -44,6 +45,7 @@ class CPUAnalyzer:
         interval=0.5,
         use_color=True,
         mode="standard",
+        tips_enabled=True
     ):
 
         # Clear previous history
@@ -52,6 +54,7 @@ class CPUAnalyzer:
         start_time = time.time()
         core_samples = []
 
+        # Print which type of analysis is being performed
         if mode == "standard":
             msg = "Running standard analysis. Please wait..."
 
@@ -59,12 +62,22 @@ class CPUAnalyzer:
             msg = "Running extended analysis. Please wait..."
 
         elif mode == "deep":
-            msg = "Running extensive analysis. Please wait..."
+            msg = "Running extended behavioral analysis. Please wait..."
 
         else:
             msg = "Running analysis. Please wait..."
 
         print(msg,file=sys.stderr)
+
+        # Add a random tip while waiting for analysis...
+        if tips_enabled and args.analyze:
+            tip = random_tip()
+
+            print("")
+            if args.color:
+                print(f"{fg(0x5287d6)}{'\n' + tip}{RESET}", file=sys.stderr)
+            else:
+                print('\n' + tip, file=sys.stderr)
 
         # ---------------------------------------------------------
         # Temporal observation window
@@ -119,6 +132,27 @@ class CPUAnalyzer:
         )
 
         # ---------------------------------------------------------
+        # Calculate logical CPU info
+        # ---------------------------------------------------------
+        logical_saturated = sum(
+            1 for u in core_usages if u >= 80
+        )
+
+        logical_active = sum(
+            1 for u in core_usages if 40 <= u < 80
+        )
+
+        logical_low = sum(
+            1 for u in core_usages if 20 <= u < 40
+        )
+
+        logical_used = (
+                logical_saturated +
+                logical_active +
+                logical_low
+        )
+
+        # ---------------------------------------------------------
         # FINAL synchronized snapshot
         # ---------------------------------------------------------
         final_processes = fetcher.fetch(args)
@@ -129,11 +163,13 @@ class CPUAnalyzer:
         ]
 
         summary = self.temporal_history.get_summary()
-        ## print(summary)
+        summary["logical_active_count"] = logical_used
+        summary["logical_total_count"] = len(core_usages)
 
         return {
             "processes": final_processes,
             "core_usages": core_usages,
+            "temporal_summary": summary,
         }
 
     # ------------------------------------------------------------
@@ -143,7 +179,8 @@ class CPUAnalyzer:
         processes,
         args,
         use_color=False,
-        core_usages=None
+        core_usages=None,
+        temporal_summary=None
     ):
         """
         Analyze CPU behavior from process list.
@@ -360,8 +397,68 @@ class CPUAnalyzer:
             distribution_type=distribution_type,
         )
 
-        temporal_summary = (
-            self.temporal_history.get_summary()
+        if temporal_summary is None:
+            temporal_summary = (
+                self.temporal_history.get_summary()
+            )
+
+        # --------------------------------------------------
+        # Contributor stability analysis
+        # --------------------------------------------------
+        top_pid_sets = [
+            set(snapshot.get("top_pids", []))
+            for snapshot in self.temporal_history.history
+        ]
+
+        stable_samples = 0
+
+        for i in range(1, len(top_pid_sets)):
+
+            overlap = len(
+                top_pid_sets[i] &
+                top_pid_sets[i - 1]
+            )
+
+            if overlap >= 3:
+                stable_samples += 1
+
+        if len(top_pid_sets) > 1:
+
+            contributor_stability = (
+                                            stable_samples /
+                                            (len(top_pid_sets) - 1)
+                                    ) * 100
+
+        else:
+            contributor_stability = 0.0
+
+        # --------------------------------------------------
+        # Observation consistency
+        # --------------------------------------------------
+        dominant_persistence = temporal_summary.get(
+            "dominant_persistence",
+            0.0
+        )
+
+        cpu_delta = temporal_summary.get(
+            "cpu_delta",
+            0.0
+        )
+
+        consistency_score = (
+                (dominant_persistence * 0.5) +
+                (contributor_stability * 0.5)
+        )
+
+        if cpu_delta < 10:
+            consistency_score += 10
+
+        elif cpu_delta > 30:
+            consistency_score -= 10
+
+        consistency_score = max(
+            0,
+            min(consistency_score, 100)
         )
 
         return {
@@ -373,6 +470,8 @@ class CPUAnalyzer:
             "top": top,
             "filtered": real_processes,
             "temporal_summary": temporal_summary,
+            "contributor_stability": contributor_stability,
+            "consistency_score": consistency_score,
         }
 
     # ------------------------------------------------------------
@@ -591,8 +690,16 @@ class CPUAnalyzer:
         processes = analysis.get("filtered", analysis.get("processes", []))
         dominant = analysis["dominant"]
         temporal = analysis.get("temporal_summary", {})
-        top = analysis["top"]
-        physical_core_count = get_cpu_count()
+
+        contributor_stability = analysis.get(
+            "contributor_stability",
+            0.0
+        )
+
+        consistency_score = analysis.get(
+            "consistency_score",
+            0.0
+        )
 
         # --------------------------------------------------
         # Logical CPU topology
@@ -614,6 +721,13 @@ class CPUAnalyzer:
         )
         logical_idle = sum(
             1 for u in logical_usages if u < 20
+        )
+        logical_total = len(logical_usages)
+
+        logical_used = (
+                logical_saturated +
+                logical_active +
+                logical_low
         )
 
         # --------------------------------------------------
@@ -680,14 +794,50 @@ class CPUAnalyzer:
         total_cpu_usage = round(sum(p.cpu for p in active_processes), 1)
         physical_cpu_capacity = physical_core_count * 100
 
+        # Extract some needed data
+        mean_cpu = temporal.get("mean_cpu", 0.0)
+        cpu_delta = temporal.get("cpu_delta", 0.0)
+        dominant_persistence = temporal.get("dominant_persistence", 0.0)
+        spread_ratio = (
+                physical_used / physical_core_count
+        )
+
+        top_pid_sets = [
+            set(snapshot.get("top_pids", []))
+            for snapshot in self.temporal_history.history
+        ]
+
+        stable_samples = 0
+
+        for i in range(1, len(top_pid_sets)):
+
+            overlap = len(
+                top_pid_sets[i] &
+                top_pid_sets[i - 1]
+            )
+
+            if overlap >= 3:
+                stable_samples += 1
+
+        if len(top_pid_sets) > 1:
+            contributor_stability = (
+                                            stable_samples / (len(top_pid_sets) - 1)
+                                    ) * 100
+        else:
+            contributor_stability = 0.0
+
+
         if "DISTRIBUTED" in state:
 
             # Use color
             if args.color:
-                lines.append(f"{fg(0xaaaaaa)}• CPU load is distributed across multiple processes{RESET}")
+                lines.append(f"{fg(0xaaaaaa)}• {RESET}"
+                             f"{fg(0xffffff)}Core Observations:{RESET}")
+
+                lines.append(f"{fg(0xaaaaaa)}  • CPU activity is being shared across multiple active workloads{RESET}")
 
                 lines.append(
-                    f"{fg(0xaaaaaa)}└─ {RESET}"
+                    f"{fg(0xaaaaaa)}    └─ {RESET}"
                     f"{fg(0xffffff)}{len(active_processes)}{RESET}"
                     f"{fg(0xaaaaaa)} processes are actively consuming {RESET}"
                     f"{fg(0xffffff)}{total_cpu_usage}{RESET}"
@@ -696,20 +846,22 @@ class CPUAnalyzer:
                     f"{fg(0xffffff)}{physical_cpu_capacity}{RESET}"
                     f"{fg(0xaaaaaa)}% → {RESET}"
                     f"{fg(0xffffff)}{physical_core_count}{RESET}"
-                    f"{fg(0xaaaaaa)} x 100%){RESET}"
+                    f"{fg(0xaaaaaa)} x "
+                    f"{fg(0xffffff)}100{RESET}"
+                    f"{fg(0xaaaaaa)}%){RESET}"
                 )
 
                 # First: capacity view
-                lines.append(f"  {fg(0xaaaaaa)}└─ {RESET}"
-                    f"{fg(0xffffff)}{physical_used}{RESET} "
-                    f"{fg(0xaaaaaa)} / {RESET} "
-                    f"{fg(0xffffff)}{physical_core_count}{RESET} "
-                    f"{fg(0xaaaaaa)}physical cores actively utilized during the observation window{RESET}"
+                lines.append(f"{fg(0xaaaaaa)}    └─ {RESET}"
+                    f"{fg(0xffffff)}{physical_used}{RESET}"
+                    f"{fg(0xaaaaaa)} / {RESET}"
+                    f"{fg(0xffffff)}{physical_core_count}{RESET}"
+                    f"{fg(0xaaaaaa)} physical cores actively utilized during the observation window{RESET}"
                 )
 
                 # Second: distribution view
                 lines.append(
-                    f"  {fg(0xaaaaaa)}└─ {RESET}"
+                    f"{fg(0xaaaaaa)}    └─ {RESET}"
                     f"{fg(0xffffff)}{physical_saturated} {RESET}"
                     f"{fg(0xaaaaaa)}physical core{'s' if physical_saturated != 1 else ''} saturated, {RESET}"
                     f"{fg(0xffffff)}{physical_active} {RESET}"
@@ -721,60 +873,124 @@ class CPUAnalyzer:
                 )
             # No color
             else:
-                lines.append("• CPU load is distributed across multiple processes")
-                lines.append(f"  └─ {len(active_processes)} processes are actively consuming "
+                lines.append("  Core Observations:")
+
+                lines.append("  • CPU activity is being shared across multiple active workloads")
+                lines.append(f"    └─ {len(active_processes)} processes are actively consuming "
                      f"{total_cpu_usage}% of total CPU resources "
                      f"({physical_cpu_capacity}% → {physical_core_count} x 100%)"
                 )
 
                 # First: capacity view
-                lines.append(f"  └─ {physical_used} / {physical_core_count} "
+                lines.append(f"    └─ {physical_used} / {physical_core_count} "
                     f"physical cores actively utilized during the observation window"
                 )
 
                 # Second: distribution view
                 lines.append(
-                    f"  └─ {physical_saturated} physical core{'s' if physical_saturated != 1 else ''} saturated, "
+                    f"    └─ {physical_saturated} physical core{'s' if physical_saturated != 1 else ''} saturated, "
                     f"{physical_active} active, {physical_low} low activity, {physical_idle} idle"
                 )
 
             # ------------------------------------------
-            # Imbalance detection (proper model)
+            # Distribution interpretation
             # ------------------------------------------
-
-            total_physical = physical_core_count
-
             if args.color:
 
-                if physical_saturated == total_physical:
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is fully distributed across all physical cores{RESET}")
+                if spread_ratio >= 0.90:
 
-                elif physical_saturated >= total_physical * 0.7:
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is well distributed across physical cores{RESET}")
+                    if physical_saturated >= (
+                            physical_core_count * 0.7
+                    ):
 
-                elif physical_saturated <= max(1, int(total_physical * 0.3)):
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is unevenly distributed across physical cores{RESET}")
-                    lines.append(f"{fg(0xaaaaaa)}  └─ Workload may be limited by single-thread performance{RESET}")
+                        lines.append(
+                            f"{fg(0xaaaaaa)}    └─ High execution pressure is distributed "
+                            f"across nearly all physical cores{RESET}"
+                        )
+
+                    else:
+
+                        lines.append(
+                            f"{fg(0xaaaaaa)}    └─ CPU activity is broadly distributed "
+                            f"across most physical cores{RESET}"
+                        )
+
+                elif spread_ratio >= 0.50:
+
+                    lines.append(
+                        f"{fg(0xaaaaaa)}    └─ Execution pressure is moderately "
+                        f"distributed across active physical cores{RESET}"
+                    )
+
+                else:
+
+                    lines.append(
+                        f"{fg(0xaaaaaa)}    └─ CPU activity is concentrated on "
+                        f"a limited number of physical cores{RESET}"
+                    )
+
+                    if (
+                            spread_ratio < 0.20 and
+                            physical_saturated <= 2
+                    ):
+                        lines.append(
+                            f"{fg(0xaaaaaa)}    └─ Workload characteristics resemble "
+                            f"single-thread constrained execution{RESET}"
+                        )
 
             else:
 
-                if physical_saturated == total_physical:
-                    lines.append("  └─ CPU load is fully distributed across all physical cores")
+                if spread_ratio >= 0.90:
 
-                elif physical_saturated >= total_physical * 0.7:
-                    lines.append("  └─ CPU load is well distributed across physical cores")
+                    if physical_saturated >= (
+                            physical_core_count * 0.7
+                    ):
 
-                elif physical_saturated <= max(1, int(total_physical * 0.3)):
-                    lines.append("  └─ CPU load is unevenly distributed across physical cores")
-                    lines.append("  └─ Workload may be limited by single-thread performance")
+                        lines.append(
+                            "    └─ High execution pressure is distributed "
+                            "across nearly all physical cores"
+                        )
+
+                    else:
+
+                        lines.append(
+                            "    └─ CPU activity is broadly distributed "
+                            "across most physical cores"
+                        )
+
+                elif spread_ratio >= 0.50:
+
+                    lines.append(
+                        "    └─ Execution pressure is moderately "
+                        "distributed across active physical cores"
+                    )
+
+                else:
+
+                    lines.append(
+                        "    └─ CPU activity is concentrated on "
+                        "a limited number of physical cores"
+                    )
+
+                    if (
+                            spread_ratio < 0.20 and
+                            physical_saturated <= 2
+                    ):
+                        lines.append(
+                            "    └─ Workload characteristics resemble "
+                            "single-thread constrained execution"
+                        )
 
         elif "LOCALIZED" in state:
 
             # Use color
             if args.color:
-                lines.append(f"{fg(0xaaaaaa)}• CPU load is concentrated in a small number of processes{RESET}")
+                lines.append(f"{fg(0xaaaaaa)}• {RESET}"
+                             f"{fg(0xffffff)}Core Observations:{RESET}")
+
+                lines.append(f"{fg(0xaaaaaa)}  • CPU load is concentrated in a small number of processes{RESET}")
                 # First: capacity view
-                lines.append(f"{fg(0xaaaaaa)}  └─ {RESET}"
+                lines.append(f"{fg(0xaaaaaa)}    └─ {RESET}"
                              f"{fg(0xffffff)}{physical_used}{RESET} "
                              f"{fg(0xaaaaaa)} / {RESET} "
                              f"{fg(0xffffff)}{physical_core_count}{RESET} "
@@ -783,7 +999,7 @@ class CPUAnalyzer:
 
                 # Second: distribution view
                 lines.append(
-                            f"{fg(0xaaaaaa)}  └─ {RESET}"
+                            f"{fg(0xaaaaaa)}    └─ {RESET}"
                             f"{fg(0xffffff)}{physical_saturated} {RESET}"
                             f"{fg(0xaaaaaa)}physical core{'s' if physical_saturated != 1 else ''} saturated, {RESET}"
                             f"{fg(0xffffff)}{physical_active} {RESET}"
@@ -796,13 +1012,15 @@ class CPUAnalyzer:
 
             # No color
             else:
-                lines.append(f"• CPU load is concentrated in a small number of processes")
+                lines.append("• Core Observations:")
+
+                lines.append(f"  • CPU load is concentrated in a small number of processes")
                 # First: capacity view
-                lines.append(f"  └─ {physical_used} / {physical_core_count} physical cores actively utilized during the observation window")
+                lines.append(f"    └─ {physical_used} / {physical_core_count} physical cores actively utilized during the observation window")
 
                 # Second: distribution view
                 lines.append(
-                    f"  └─ {physical_saturated} physical core{'s' if physical_saturated != 1 else ''} saturated, "
+                    f"    └─ {physical_saturated} physical core{'s' if physical_saturated != 1 else ''} saturated, "
                     f"{physical_active} active, {physical_low} low activity, {physical_idle} idle"
                 )
 
@@ -814,40 +1032,43 @@ class CPUAnalyzer:
             if args.color:
 
                 if physical_saturated == total_physical:
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is fully distributed across all physical cores{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ CPU load is fully distributed across all physical cores{RESET}")
 
                 elif physical_saturated >= total_physical * 0.7:
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is well distributed across all physical cores{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ CPU load is well distributed across all physical cores{RESET}")
 
                 elif physical_saturated <= max(1, int(total_physical * 0.3)):
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is unevenly distributed across all physical cores{RESET}")
-                    lines.append(f"{fg(0xaaaaaa)}  └─ Workload may be limited by single-thread performance{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ CPU load is unevenly distributed across all physical cores{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ Workload may be limited by single-thread performance{RESET}")
 
             else:
 
                 if physical_saturated == total_physical:
-                    lines.append("  └─ CPU load is fully distributed across all physical cores")
+                    lines.append("    └─ CPU load is fully distributed across all physical cores")
 
                 elif physical_saturated >= total_physical * 0.7:
-                    lines.append("  └─ CPU load is well distributed across all physical cores")
+                    lines.append("    └─ CPU load is well distributed across all physical cores")
 
                 elif physical_saturated <= max(1, int(total_physical * 0.3)):
-                    lines.append("  └─ CPU load is unevenly distributed across all physical cores")
-                    lines.append("  └─ Workload may be limited by single-thread performance")
+                    lines.append("    └─ CPU load is unevenly distributed across all physical cores")
+                    lines.append("    └─ Workload may be limited by single-thread performance")
 
         else:
             # Use color
             if args.color:
-                lines.append(f"{fg(0xaaaaaa)}• CPU activity is present but not strongly concentrated{RESET}")
+                lines.append(f"{fg(0xaaaaaa)}• {RESET}"
+                             f"{fg(0xffffff)}Core Observations:{RESET}")
+
+                lines.append(f"{fg(0xaaaaaa)}  • CPU activity is present but not strongly concentrated{RESET}")
                 # First: capacity view
-                lines.append(f"  {fg(0xaaaaaa)}└─ {RESET}"
+                lines.append(f"{fg(0xaaaaaa)}    └─ {RESET}"
                              f"{fg(0xffffff)}{physical_used} {RESET}"
                              f"/ {fg(0xffffff)}{physical_core_count} {RESET}"
                              f"{fg(0xaaaaaa)}physical cores are actively utilized{RESET}")
 
                 # Second: distribution view
                 lines.append(
-                    f"  {fg(0xaaaaaa)}└─ {RESET}"
+                    f"{fg(0xaaaaaa)}    └─ {RESET}"
                     f"{fg(0xffffff)}{physical_saturated} {RESET}"
                     f"{fg(0xaaaaaa)}physical core{'s' if physical_saturated != 1 else ''} saturated, {RESET}"
                     f"{fg(0xffffff)}{physical_active} {RESET}"
@@ -860,13 +1081,15 @@ class CPUAnalyzer:
 
             # No color
             else:
-                lines.append("• CPU activity is present but not strongly concentrated")
+                lines.append("• Core Observations:")
+
+                lines.append("  • CPU activity is present but not strongly concentrated")
                 # First: capacity view
-                lines.append(f"  └─ {physical_used} / {physical_core_count} physical cores are actively utilized")
+                lines.append(f"    └─ {physical_used} / {physical_core_count} physical cores are actively utilized")
 
                 # Second: distribution view
                 lines.append(
-                    f"  └─ {physical_saturated} physical core{'s' if physical_saturated != 1 else ''} saturated, "
+                    f"    └─ {physical_saturated} physical core{'s' if physical_saturated != 1 else ''} saturated, "
                     f"{physical_active} active, {physical_low} low activity, {physical_idle} idle"
                 )
 
@@ -879,113 +1102,365 @@ class CPUAnalyzer:
             if args.color:
 
                 if physical_saturated == total_physical:
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is fully distributed across all physical cores{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ CPU load is fully distributed across all physical cores{RESET}")
 
                 elif physical_saturated >= total_physical * 0.7:
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is well distributed across all physical cores{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ CPU load is well distributed across all physical cores{RESET}")
 
                 elif physical_saturated <= max(1, int(total_physical * 0.3)):
-                    lines.append(f"{fg(0xaaaaaa)}  └─ CPU load is unevenly distributed across all physical cores{RESET}")
-                    lines.append(f"{fg(0xaaaaaa)}  └─ Workload may be limited by single-thread performance{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ CPU load is unevenly distributed across all physical cores{RESET}")
+                    lines.append(f"{fg(0xaaaaaa)}    └─ Workload may be limited by single-thread performance{RESET}")
 
             else:
 
                 if physical_saturated == total_physical:
-                    lines.append("  └─ CPU load is fully distributed across all physical cores")
+                    lines.append("    └─ CPU load is fully distributed across all physical cores")
 
                 elif physical_saturated >= total_physical * 0.7:
-                    lines.append("  └─ CPU load is well distributed across all physical cores")
+                    lines.append("    └─ CPU load is well distributed across all physical cores")
 
                 elif physical_saturated <= max(1, int(total_physical * 0.3)):
-                    lines.append("  └─ CPU load is unevenly distributed across all physical cores")
-                    lines.append("  └─ Workload may be limited by single-thread performance")
+                    lines.append("    └─ CPU load is unevenly distributed across all physical cores")
+                    lines.append("    └─ Workload may be limited by single-thread performance")
 
+
+        # --------------------------------------------------
+        # Logical CPU insight
+        # --------------------------------------------------
+        if logical_saturated:
+
+            # Using colors
+            if args.color:
+
+                if args.analyze in ("more", "deep"):
+                    lines.append(f"{fg(0xaaaaaa)}•{RESET} Logical CPU observations:")
+
+                    # ------------------------------------------
+                    # Saturated logical CPUs
+                    # ------------------------------------------
+                    if logical_saturated >= 1:
+
+                        if logical_saturated == 1:
+                            lines.append(
+                                f"  {fg(0xaaaaaa)}• {RESET}"
+                                f"{logical_saturated}"
+                                f"{fg(0xaaaaaa)} logical CPU is saturated {RESET}"
+                                f"{fg(0xaaaaaa)}({RESET}"
+                                f"{fg(0xffffff)}≥80{RESET}"
+                                f"{fg(0xaaaaaa)}% {RESET}"
+                                f"{fg(0xaaaaaa)}utilization){RESET}"
+                            )
+
+                        else:
+                            lines.append(
+                                f"  {fg(0xaaaaaa)}• {RESET}"
+                                f"{logical_saturated} "
+                                f"{fg(0xaaaaaa)}logical CPUs are saturated {RESET}"
+                                f"{fg(0xaaaaaa)}({RESET}"
+                                f"{fg(0xffffff)}≥80{RESET}"
+                                f"{fg(0xaaaaaa)}% {RESET}"
+                                f"{fg(0xaaaaaa)}utilization){RESET}"
+                            )
+
+                        # ------------------------------------------
+                        # Interpretation layer
+                        # ------------------------------------------
+                        if logical_saturated >= logical_total * 0.5:
+
+                            lines.append(
+                                f"{fg(0xaaaaaa)}    └─ Sustained execution pressure is affecting a large portion of logical CPUs{RESET}"
+                            )
+
+                        elif logical_saturated >= 2:
+
+                            lines.append(
+                                f"{fg(0xaaaaaa)}    └─ Multiple logical CPUs are under sustained execution pressure{RESET}"
+                            )
+
+                        else:
+
+                            lines.append(
+                                f"{fg(0xaaaaaa)}    └─ Localized execution pressure is concentrated on a single logical CPU{RESET}"
+                            )
+
+                # --------------------------------------------------
+                # Limited logical CPU utilization efficiency
+                # --------------------------------------------------
+                if (
+                        args.analyze == "deep"
+                        and ("MODERATE" in state or "HEAVY" in state)
+                        and logical_used <= logical_total * 0.3
+                ):
+                    lines.append(
+                        f"{fg(0xaaaaaa)}  • CPU activity is concentrated on a limited number of logical CPUs{RESET}"
+                    )
+
+                    lines.append(
+                        f"{fg(0xaaaaaa)}     └─ Significant logical CPU capacity remains available{RESET}"
+                    )
+
+            # No colors
+            else:
+                if args.analyze in ("more", "deep"):
+                    lines.append("• Logical CPU observations:")
+
+                    # ------------------------------------------
+                    # Saturated logical CPUs
+                    # ------------------------------------------
+                    if logical_saturated >= 1:
+
+                        if logical_saturated == 1:
+                            lines.append(
+                                f"  • {logical_saturated} logical CPU is saturated "
+                                f"(≥80% utilization)"
+                            )
+
+                        else:
+                            lines.append(
+                                f"  • {logical_saturated} logical CPUs are saturated "
+                                f"(≥80% utilization)"
+                            )
+
+                        # ------------------------------------------
+                        # Interpretation layer
+                        # ------------------------------------------
+                        if logical_saturated >= logical_total * 0.5:
+
+                            lines.append(
+                                "    └─ Sustained execution pressure is affecting a large portion of logical CPUs"
+                            )
+
+                        elif logical_saturated >= 2:
+
+                            lines.append(
+                                "    └─ Multiple logical CPUs are under sustained execution pressure"
+                            )
+
+                        else:
+
+                            lines.append(
+                                "    └─ Localized execution pressure is concentrated on a single logical CPU"
+                            )
+
+                # --------------------------------------------------
+                # Limited logical CPU utilization efficiency
+                # --------------------------------------------------
+                if (
+                        args.analyze == "deep"
+                        and ("MODERATE" in state or "HEAVY" in state)
+                        and logical_used <= logical_total * 0.3
+                ):
+                    lines.append(
+                        "  • CPU activity is concentrated on a limited number of logical CPUs"
+                    )
+
+                    lines.append(
+                        "     └─ Significant logical CPU capacity remains available"
+                    )
 
         # --------------------------------------------------
         # Temporal history insight
         # --------------------------------------------------
         if temporal:
 
-            # Extract some needed data
-            mean_cpu = temporal.get("mean_cpu", 0.0)
-            cpu_delta = temporal.get("cpu_delta", 0.0)
-            dominant_persistence = temporal.get("dominant_persistence", 0.0)
+            # --------------------------------------------------
+            # Deep behavioral observations
+            # --------------------------------------------------
+            if args.analyze in ("more", "deep"):
 
-            # Append
-            if args.color:
-                lines.append("• Temporal observations:")
+                # Use colors
+                if args.color:
+                    lines.append(f"{fg(0xaaaaaa)}• {RESET}"
+                                 f"{fg(0xffffff)}Temporal observations:{RESET}")
 
-                if cpu_delta < 10:
-                    lines.append(
-                        f"{fg(0xaaaaaa)}  └─ CPU activity remained relatively stable during observation{RESET}"
-                    )
+                    if cpu_delta < 10:
 
-                elif cpu_delta < 30:
-                    lines.append(
-                        f"{fg(0xaaaaaa)}  └─ CPU activity fluctuated moderately during observation{RESET}"
-                    )
-
-                else:
-                    lines.append(
-                        f"{fg(0xaaaaaa)}  └─ CPU activity fluctuated significantly during observation{RESET}"
-                    )
-
-                if args.analyze in ("more", "deep"):
-
-                    if dominant_persistence >= 80:
                         lines.append(
-                            f"{fg(0xaaaaaa)}     └─ Dominant workload persisted across most samples{RESET}"
-                        )
-            else:
-                lines.append("• Temporal observations:")
-
-                if cpu_delta < 10:
-                    lines.append(
-                        "  └─ CPU activity remained relatively stable during observation"
-                    )
-
-                elif cpu_delta < 30:
-                    lines.append(
-                        "  └─ CPU activity fluctuated moderately during observation"
-                    )
-
-                else:
-                    lines.append(
-                        "  └─ CPU activity fluctuated significantly during observation"
-                    )
-
-                if args.analyze in ("more", "deep"):
-
-                    if dominant_persistence >= 80:
-                        lines.append(
-                            "     └─ Dominant workload persisted across most samples"
+                            f"{fg(0xaaaaaa)}  • System behavior remained highly consistent across the extended observation window{RESET}"
                         )
 
-        # --------------------------------------------------
-        # Dominant process insight
-        # --------------------------------------------------
-        if dominant:
+                    elif cpu_delta < 30:
 
-            if args.color:
-                if state == "IDLE":
-                    lines.append(f"{fg(0xaaaaaa)}• {RESET}"
-                                 f"{fg(0xffffff)}Most active process: {RESET}"
-                                 f"{fg(0x777777)}{dominant.comm} {RESET}"
-                                 f"{fg(0xaaaaaa)}({RESET}"
-                                 f"{fg(0xffffff)}{dominant.cpu:.1f}{RESET}"
-                                 f"{fg(0xaaaaaa)}%){RESET}")
+                        lines.append(
+                            f"{fg(0xaaaaaa)}  • Workload behavior evolved moderately during the observation period{RESET}"
+                        )
+
+                    else:
+
+                        lines.append(
+                            f"{fg(0xaaaaaa)}  • Workload characteristics shifted noticeably during the observation period{RESET}"
+                        )
+
+                    # ------------------------------------------
+                    # Contributor stability
+                    # ------------------------------------------
+                    if contributor_stability >= 80:
+                        lines.append(
+                            f"{fg(0xaaaaaa)}  • Workload activity remained highly consistent during observation ({RESET}"
+                            f"{contributor_stability:.0f}"
+                            f"{fg(0xaaaaaa)})%{RESET}"
+                        )
+
+                        # ------------------------------------------
+                        # Dominant persistence
+                        # ------------------------------------------
+                        if dominant_persistence >= 80:
+                            lines.append(
+                                f"{fg(0xaaaaaa)}     └─ The same workload remained dominant throughout most observation samples ({RESET}"
+                                f"{dominant_persistence:.0f}"
+                                f"{fg(0xaaaaaa)})%{RESET}"
+                            )
+
+                            lines.append(
+                                f"{fg(0xaaaaaa)}     └─ The workload pattern remained stable throughout the extended observation period{RESET}"
+                            )
+
+
+                    elif contributor_stability >= 50:
+                        lines.append(
+                            f"{fg(0xaaaaaa)}  • Workload activity shifted moderately during observation ({RESET}"
+                            f"{contributor_stability:.0f}"
+                            f"{fg(0xaaaaaa)})%{RESET}"
+                        )
+
+                    else:
+                        lines.append(
+                            f"{fg(0xaaaaaa)}  • Workload activity changed frequently during observation ({RESET}"
+                            f"{contributor_stability:.0f}"
+                            f"{fg(0xaaaaaa)})%{RESET}"
+                        )
+
+                # No colors
                 else:
-                    lines.append(f"{fg(0xaaaaaa)}• {RESET}"
-                                 f"{fg(0xffffff)}Dominant workload: {RESET}"
-                                 f"{fg(0x777777)}{dominant.comm} {RESET}"
-                                 f"{fg(0xaaaaaa)}({RESET}"
-                                 f"{fg(0xffffff)}{dominant.cpu:.1f}{RESET}"
-                                 f"{fg(0xaaaaaa)}%){RESET}")
-            else:
-                if state == "IDLE":
-                    lines.append(f"• Most active process: {dominant.comm} ({dominant.cpu:.1f}%)")
+                    if args.analyze in ("more", "deep"):
+
+                        lines.append("• Temporal observations:")
+
+                        if cpu_delta < 10:
+
+                            lines.append(
+                                "  • System behavior remained highly consistent across the extended observation window"
+                            )
+
+                        elif cpu_delta < 30:
+
+                            lines.append(
+                                "  • Workload behavior evolved moderately during the observation period"
+                            )
+
+                        else:
+
+                            lines.append(
+                                "  • Workload characteristics shifted noticeably during the observation period"
+                            )
+
+                        # ------------------------------------------
+                        # Contributor stability
+                        # ------------------------------------------
+                        if contributor_stability >= 80:
+                            lines.append(
+                                f"  • Workload activity remained highly consistent during observation"
+                                f" ({contributor_stability:.0f})%"
+                            )
+
+                            # ------------------------------------------
+                            # Dominant persistence
+                            # ------------------------------------------
+                            if dominant_persistence >= 80:
+                                lines.append(
+                                    f"     └─ The same workload remained dominant throughout most observation samples"
+                                    f" ({dominant_persistence:.0f})%"
+                                )
+
+                                lines.append(
+                                    f"     └─ The workload pattern remained stable throughout the extended observation period"
+                                )
+
+                        elif contributor_stability >= 50:
+                            lines.append(
+                                f"  • Workload activity shifted moderately during observation"
+                                f" ({contributor_stability:.0f})%"
+                            )
+
+                        else:
+                            lines.append(
+                                f"  • Workload activity changed frequently during observation"
+                                f" ({contributor_stability:.0f})%"
+                            )
+
+
+        # --------------------------------------------------
+        # Behavioral Observations & load intensity
+        # --------------------------------------------------
+
+        # Using colors
+        if args.color:
+
+            lines.append(f"{fg(0xaaaaaa)}• {RESET}"
+                         f"{fg(0xffffff)}Behavioral Observations:{RESET}")
+
+            # --------------------------------------------------
+            # Dominant process insight
+            # --------------------------------------------------
+            if dominant:
+
+                # Using colors
+                if args.color:
+                    if state == "IDLE":
+                        lines.append(f"{fg(0xaaaaaa)}  • Most active process: {RESET}"
+                                     f"{fg(0x5287d6)}{dominant.comm} {RESET}"
+                                     f"{fg(0xaaaaaa)}({RESET}"
+                                     f"{fg(0xffffff)}{dominant.cpu:.1f}{RESET}"
+                                     f"{fg(0xaaaaaa)}%){RESET}")
+
+                    else:
+                        lines.append(f"{fg(0xaaaaaa)}  • Dominant workload: {RESET}"
+                                     f"{fg(0x5287d6)}{dominant.comm} {RESET}"
+                                     f"{fg(0xaaaaaa)}({RESET}"
+                                     f"{fg(0xffffff)}{dominant.cpu:.1f}{RESET}"
+                                     f"{fg(0xaaaaaa)}%){RESET}")
+
+                # No colors
                 else:
-                    lines.append(f"• Dominant workload: {dominant.comm} ({dominant.cpu:.1f}%)")
+                    if state == "IDLE":
+                        lines.append(f"  • Most active process: {dominant.comm} ({dominant.cpu:.1f}%)")
+                    else:
+                        lines.append(f"  • Dominant workload: {dominant.comm} ({dominant.cpu:.1f}%)")
+
+            # --------------------------------------------------
+            # Load Intensity
+            # --------------------------------------------------
+
+            if "HEAVY" in state:
+                lines.append(f"{fg(0xaaaaaa)}  • System is under sustained computational pressure{RESET}")
+
+            elif "MODERATE" in state:
+                lines.append(f"{fg(0xaaaaaa)}  • Workload is noticeable but not saturating the system{RESET}")
+
+            elif state == "LIGHT":
+                lines.append(f"{fg(0xaaaaaa)}  • System is responsive with light activity{RESET}")
+
+            elif state == "IDLE":
+                lines.append(f"{fg(0xaaaaaa)}  • System is mostly idle{RESET}")
+
+        # No colors.
+        else:
+            lines.append("• Behavioral Observations:")
+
+            if "HEAVY" in state:
+                lines.append(
+                    f"  • System is under sustained computational pressure")
+
+            elif "MODERATE" in state:
+                lines.append(
+                    f"  • Workload is noticeable but not saturating the system")
+
+            elif state == "LIGHT":
+                lines.append(f"  • System is responsive with light activity")
+
+            elif state == "IDLE":
+                lines.append(f"  • System is mostly idle")
+
 
         # ------------------------------------------------------------------------------------------
         # STAT interpretation (FULL, no shortcuts)
@@ -1062,79 +1537,53 @@ class CPUAnalyzer:
         )
 
         # Output section
-        if stat_chars:
+        if args.analyze != "deep":
+            if stat_chars:
 
-            # Use colors
-            if args.color:
-
-                lines.append(
-                    f"{fg(0xaaaaaa)}• {RESET}"
-                    f"{fg(0xffffff)}STAT indicates:{RESET}"
-                    f"{fg(0xffffff)} {', '.join(stat_chars)}{RESET}"
-                )
-
-                # Print the stat explanations
-                for key in stat_chars:
-                    desc = STAT_MEANINGS.get(key, "Unknown state")
-
+                # Use colors
+                if args.color:
+                    lines.append("")
+                    lines.append("STAT Explanation")
                     lines.append(
-                        f"  {fg(0xaaaaaa)}└─ {RESET}"
-                        f"{fg(0xffffff)}{key} {RESET}"
-                        f"{fg(0xaaaaaa)}→ {RESET}"
-                        f"{fg(0xaaaaaa)}{desc}{RESET}"
+                        f"{fg(0xaaaaaa)}• {RESET}"
+                        f"{fg(0xffffff)}STAT indicates:{RESET}"
                     )
 
-            # No color
-            else:
-                lines.append(
-                    f"• STAT indicates:{', '.join(stat_chars)}"
-                )
+                    # Print the stat explanations
+                    for key in stat_chars:
+                        desc = STAT_MEANINGS.get(key, "Unknown state")
 
-                # Print the stat explanations
-                for key in stat_chars:
-                    desc = STAT_MEANINGS.get(key, "Unknown state")
+                        lines.append(
+                            f"  {fg(0xaaaaaa)}└─ {RESET}"
+                            f"{fg(0xffffff)}{key} {RESET}"
+                            f"{fg(0xaaaaaa)}→ {RESET}"
+                            f"{fg(0xaaaaaa)}{desc}{RESET}"
+                        )
 
+                # No color
+                else:
+                    lines.append("")
+                    lines.append("STAT Explanation")
                     lines.append(
-                        f"  └─ {key} → {desc}"
+                        f"• STAT indicates:"
                     )
 
-        # --------------------------------------------------
-        # 4. Load intensity
-        # --------------------------------------------------
-        if args.color:
-            if "HEAVY" in state:
-                lines.append(f"{fg(0xaaaaaa)}• {RESET}{fg(0xffffff)}System is under sustained computational pressure{RESET}")
+                    # Print the stat explanations
+                    for key in stat_chars:
+                        desc = STAT_MEANINGS.get(key, "Unknown state")
 
-            elif "MODERATE" in state:
-                lines.append(f"{fg(0xaaaaaa)}• {RESET}{fg(0xffffff)}Workload is noticeable but not saturating the system{RESET}")
-
-            elif state == "LIGHT":
-                lines.append(f"{fg(0xaaaaaa)}• {RESET}{fg(0xffffff)}System is responsive with light activity{RESET}")
-
-            elif state == "IDLE":
-                lines.append(f"{fg(0xaaaaaa)}• {RESET}{fg(0xffffff)}System is mostly idle{RESET}")
-
-        else:
-            if "HEAVY" in state:
-                lines.append(
-                    f"• System is under sustained computational pressure")
-
-            elif "MODERATE" in state:
-                lines.append(
-                    f"• Workload is noticeable but not saturating the system")
-
-            elif state == "LIGHT":
-                lines.append(f"• System is responsive with light activity")
-
-            elif state == "IDLE":
-                lines.append(f"• System is mostly idle")
+                        lines.append(
+                            f"  └─ {key} → {desc}"
+                        )
 
         # ------------------------------------------------------------------
         # NOTE: line to mention the percentage that the total cores make out
         # ------------------------------------------------------------------
         lines.append("")
         if args.color:
-            lines.append(f"NOTE: {fg(0xffffff)}CPU usage is cumulative across cores (100% per core on multi-core systems){RESET}")
+            lines.append(f"NOTE: {fg(0xffffff)}CPU usage is cumulative across cores ("
+            f"{fg(0xffffff)}100{RESET}"
+            f"% per core on multi-core systems){RESET}")
         else:
             lines.append("NOTE: CPU usage is cumulative across cores (100% per core on multi-core systems)")
         # 5. Conclusion

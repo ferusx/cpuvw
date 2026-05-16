@@ -7,6 +7,9 @@
 from collections import deque
 from time import time
 
+# Local imports
+from utils import get_cpu_topology
+
 # ****************************************************************************
 # Class: TemporalHistory
 # ****************************************************************************
@@ -105,10 +108,24 @@ class TemporalHistory:
             if s["dominant_pid"] is not None
         ]
 
-        mean_cpu = sum(total_values) / len(total_values)
+        topology = get_cpu_topology()
 
-        min_cpu = min(total_values)
-        max_cpu = max(total_values)
+        physical_core_count = len(
+            topology["physical_cores"]
+        )
+
+        normalized_values = [
+            value / physical_core_count
+            for value in total_values
+        ]
+
+        mean_cpu = (
+                sum(normalized_values)
+                / len(normalized_values)
+        )
+
+        min_cpu = min(normalized_values)
+        max_cpu = max(normalized_values)
 
         cpu_delta = max_cpu - min_cpu
 

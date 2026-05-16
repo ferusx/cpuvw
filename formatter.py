@@ -14,7 +14,8 @@ from constants import (
 )
 # Local imports
 from models import ProcessInfo
-from utils import visible_len, is_hidden_process
+from utils import visible_len
+from telemetry import get_cpu_topology
 
 # =========================================================
 # Class: ProcessFormatter
@@ -115,6 +116,8 @@ class ProcessFormatter:
         """
 
         term_width = shutil.get_terminal_size((120, 20)).columns
+        topology = get_cpu_topology()
+        physical_core_count = len(topology["physical_cores"])
 
         cmd_start = PID_W + USER_W + STAT_W + CPU_W + TOT_W + THR_W
         cmd_width = term_width - cmd_start
@@ -131,7 +134,7 @@ class ProcessFormatter:
             ("USER", USER_W),
             ("STAT", STAT_W),
             ("CPU%", CPU_W),
-            ("TOTAL%", TOT_W),
+            ("SYS%", TOT_W),
             ("THR", THR_W),
             ("COMMAND", None),
         ]
@@ -196,11 +199,13 @@ class ProcessFormatter:
             if cmd.startswith("ps ") and "-axo" in cmd:
                 continue
 
-            total = getattr(p, "total_cpu", p.cpu)
+            system_cpu = (
+                    p.cpu / physical_core_count
+            )
             # Raw mode bypasses all formatting for simple, script-friendly output
             if args.raw:
                 lines.append(
-                    f"{p.pid} {p.user} {p.stat} {p.cpu:.1f} {total:.1f} {p.threads} {cmd}"
+                    f"{p.pid} {p.user} {p.stat} {p.cpu:.1f} {system_cpu:.1f} {p.threads} {cmd}"
                 )
                 continue
 
@@ -209,7 +214,7 @@ class ProcessFormatter:
             user_str = f"{(p.user or '')[:USER_W]:<{USER_W}}"
             stat_str = f"{p.stat:<{STAT_W}}"
             cpu_str = f"{p.cpu:<{CPU_W}.1f}"
-            tot_str = f"{total:<{TOT_W}.1f}"
+            tot_str = f"{system_cpu:<{TOT_W}.1f}"
             thr_str = f"{p.threads:<{THR_W}}"
 
             # ------------------------------------------

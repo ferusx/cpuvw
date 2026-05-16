@@ -682,7 +682,7 @@ def extract_unique_stats(processes):
 # -------------------------------------------------------------------------------------
 def describe_stats(stat_chars):
     return [
-        f"{ch} → {STAT_MEANINGS[ch]}"
+        f"{fg(0xffffff)}{ch}{RESET} → {fg(0xaaaaaa)}{STAT_MEANINGS[ch]}{RESET}"
         for ch in stat_chars
         if ch in STAT_MEANINGS
     ]

@@ -149,6 +149,8 @@ max = 10                 # Max value for procs to show
 #         section just above this one. In order to temp-
 #         orarily show a certain number of processes,
 #         use the --number option.
+# hide_tips {true|false}
+#         Hide the random tips output in cpuvw.
 # ---------------------------------------------------- 
 
 [output]
@@ -159,6 +161,7 @@ hide_analysis = false      # Show/hide top sections
 no_table = false           # Show/hide process table 
 use_color = false          # Apply colored output
 limit = 0                  # 0 = no limit
+hide_tips = false           # Hide random tips
 
 # ====================================================
 # Table Behavior

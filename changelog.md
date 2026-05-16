@@ -26,6 +26,7 @@
 
 ## v0.3.0
 
+## [Unreleased]
 
 ### Added
 - Live logical CPU monitor (`--show-logical-cpu avg`)
@@ -74,6 +75,8 @@
 ---
 
 ## [0.4.0] - 2026-05-01
+
+## [Unreleased]
 
 ### Added
 - Full configuration system via `~/.config/cpuvw/config.toml`
@@ -182,6 +185,8 @@
 ---
 
 ## [0.6.0] - 2026-05-11
+
+## [Unreleased]
 
 ## Analyzer & Topology Overhaul
 
@@ -313,5 +318,127 @@
   - report rendering
 - Reduced ambiguity between logical CPUs and physical cores
 - Improved analyzer extensibility for future deep telemetry features
+
+---
+
+## [0.7.0] - 2026-05-16
+
+## [Unreleased]
+
+### Added
+- Introduced **CPUForge**, a dedicated CPU workload generation and behavioral stress-testing utility for CPUVw
+- Added multiple workload generation profiles to CPUForge:
+  - `stable`
+  - `bursty`
+  - `random`
+  - `localized`
+  - `distributed`
+  - `rotating`
+  - `oscillating`
+  - `microspikes`
+  - `decay`
+  - `chaotic`
+- Added `--workers` support in CPUForge for spawning configurable multi-process workloads
+- Added configurable workload percentages via `--load`
+- Added infinite and timed execution support
+- Added `--list` option for displaying available workload profiles
+- Added distributed execution pressure scheduling
+- Added rotating CPU pressure behavior
+- Added oscillating/ramping workload behavior
+- Added microspike burst scheduling
+- Added workload decay simulation
+- Added chaotic instability scheduling
+- Added reusable timing helpers for workload scheduling
+- Added scheduler abstraction layer for future workload expansion
+- Added machine-relative `SYS%` CPU metric across analyzer and process tables
+- Added system-relative CPU usage display to:
+  - Dominant Source
+  - Top Contributors
+  - regular process table
+- Added contextual workload interpretation improvements in analyzer conclusions
+- Added new conditional workload distribution entries based on actual physical core utilization ratios
+- Added active physical core spread analysis (`spread_ratio`)
+- Added dynamic execution pressure interpretation:
+  - concentrated execution
+  - moderate distribution
+  - broad distribution
+  - near full-core pressure distribution
+
+### Improved
+- Analyzer semantic consistency significantly improved
+- CPUVw now separates:
+  - execution occupancy (`CPU%`)
+  - machine-relative utilization (`SYS%`)
+- Dominant Source presentation redesigned:
+  - execution occupancy now shown directly beside process name
+  - machine-relative usage moved into contextual sub-line
+- Top Contributors table redesigned for semantic consistency:
+  - `CPU%` restored as primary execution metric
+  - `SYS%` added as contextual machine-relative metric
+- Regular process table redesigned:
+  - replaced redundant `TOTAL%` column with meaningful `SYS%`
+- Analyzer output now aligns visually and semantically across:
+  - Dominant Source
+  - Top Contributors
+  - process table
+  - behavioral observations
+- Distributed workload analysis wording improved substantially
+- Physical core distribution logic now reacts dynamically to actual spread conditions
+- Deep mode temporal observations became more responsive to unstable workloads
+- Contributor stability testing dramatically improved using CPUForge stress scenarios
+- Analyzer workload testing capabilities massively expanded through controlled synthetic CPU behavior
+- CPUForge shutdown behavior stabilized and cleaned up
+- Internal analyzer semantics clarified:
+  - `CPU%` now treated as execution pressure
+  - `SYS%` treated as machine-relative contextual usage
+
+### Changed
+- Replaced `TOTAL%` process table column with `SYS%`
+- Reworked analyzer CPU interpretation philosophy:
+  - `CPU%` remains primary scheduler/execution metric
+  - `SYS%` acts as contextualized machine impact metric
+- Adjusted Top Contributors column ordering:
+  - `CPU%` now visually prioritized over `SYS%`
+- Reworked Dominant Source output structure for improved readability and semantic hierarchy
+- Temporal observation wording updated:
+  - unstable workloads no longer described with misleading “high consistency” phrasing
+- Reworked physical core distribution descriptions to avoid falsely negative wording
+- Analyzer behavior now reacts more naturally to distributed synthetic workloads
+
+### Fixed
+- Fixed multiple CPU analyzer semantic inconsistencies exposed through synthetic workload testing
+- Fixed misleading “unevenly distributed” analysis appearing during broad multi-core utilization
+- Fixed analyzer contradictions between:
+  - Dominant Source
+  - Observation Summary
+  - Top Contributors
+- Fixed incorrect visual hierarchy between `CPU%` and machine-relative usage metrics
+- Fixed CPUForge multiprocessing shutdown deadlocks
+- Fixed CPUForge worker shutdown race conditions
+- Fixed repeated multiprocessing join assertion failures:
+  - `can only join a child process`
+- Fixed hanging worker processes during Ctrl+C shutdown
+- Fixed atexit multiprocessing shutdown issues
+- Fixed inconsistent workload interpretation under bursty workloads
+- Fixed several analyzer conditional paths that produced repetitive output across unrelated workload behaviors
+- Fixed semantic mismatch between analyzer conclusions and observed physical core utilization
+
+### Internal
+- Introduced physical-core-aware workload interpretation model
+- Introduced spread-ratio-based execution analysis
+- Improved analyzer behavioral categorization architecture
+- Expanded conditional analysis branching significantly
+- Refined analyzer semantic layering:
+  - immediate execution behavior
+  - machine-relative impact
+  - temporal behavior
+- CPUForge architecture modularized into:
+  - scheduler
+  - timing
+  - workers
+  - utilities
+- Improved workload simulation framework for future expansion and benchmarking
+- Established CPUForge as a long-term analyzer validation framework for CPUVw
+- Large-scale analyzer validation effort initiated using controlled synthetic workloads
 
 ---
