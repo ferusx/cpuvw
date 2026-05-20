@@ -916,14 +916,22 @@ class CPUVwApp:
 
             return
 
-        args.cpu_state_threshold = (
+        cpu_cfg = config.get("cpu", {})
+
+        args.heavy_threshold = (
             args.cpu_state_threshold
             if args.cpu_state_threshold is not None
-            else config.get("cpu", {}).get("cpu_threshold", 70)
+            else cpu_cfg.get(
+                "heavy",
+                cpu_cfg.get("cpu_threshold", 70)
+            )
         )
 
-        args.moderate_threshold = args.cpu_state_threshold - 30
-        args.light_threshold = max(0, args.moderate_threshold - 30)
+        args.moderate_threshold = cpu_cfg.get("active", 40)
+
+        args.light_threshold = cpu_cfg.get("low", 20)
+
+        args.cpu_state_threshold = args.heavy_threshold
 
         # ------------------------------------------
         # FETCH
@@ -1181,10 +1189,16 @@ class CPUVwApp:
             # Exclude dominant process if present
             dominant_pid = dominant.pid if dominant else None
 
-            visible = [
-                p for p in sorted_procs
-                if not dominant_pid or p.pid != dominant_pid
-            ][:10]  # fixed, clean limit
+            if state == "IDLE":
+                visible = [
+                    p for p in sorted_procs
+                    if not dominant_pid or p.pid != dominant_pid
+                ][:3]  # fixed, 3 entries
+            else:
+                visible = [
+                    p for p in sorted_procs
+                    if not dominant_pid or p.pid != dominant_pid
+                ][:10]  # fixed, 10 entries
 
             # --------------------------------------
             # Generate analysis text
@@ -1321,7 +1335,6 @@ class CPUVwApp:
                         f"{fg(0xaaaaaa)}%{RESET} "
                         f"{fg(0xaaaaaa)}(over {RESET}"
                         f"{fg(0xffffff)}{analysis_duration}{RESET}"
-                        f"{fg(0xaaaaaa)}s{RESET}"
                         f"{fg(0xaaaaaa)}s{RESET})"
                     )
                 # Contributor stability
@@ -1427,7 +1440,7 @@ class CPUVwApp:
 
             stat_processes.extend(visible)
 
-            # Header
+            # Using color
             if use_color:
 
                 title = (
@@ -1446,8 +1459,9 @@ class CPUVwApp:
                 header_cmd = "COMMAND"[:12].ljust(12)
                 header_pid = "PID".rjust(8)
                 header_stat = "STAT".ljust(4)
-                header_sys = "SYS%".rjust(4)
-                header_cpu = "CPU%".rjust(4)
+                header_cpu = "CPU%".rjust(5)
+                header_sys = "SYS%".rjust(5)
+
 
                 header_line = (
                     f""
@@ -1460,6 +1474,7 @@ class CPUVwApp:
 
                 right_lines.append(header_line)
 
+            # No colors
             else:
 
                 title = (
@@ -1476,8 +1491,9 @@ class CPUVwApp:
                 header_cmd = "COMMAND"[:12].ljust(12)
                 header_pid = "PID".rjust(8)
                 header_stat = "STAT".ljust(4)
-                header_sys = "SYS%".rjust(4)
-                header_cpu = "CPU%".rjust(4)
+                header_cpu = "CPU%".rjust(5)
+                header_sys = "SYS%".rjust(5)
+
 
                 header_line = (
                     f""
@@ -1502,7 +1518,7 @@ class CPUVwApp:
                 system_cpu = f"{system_cpu_value:.1f}%"
 
 
-                cpu = f"{p.cpu:.0f}%".rjust(4)
+                cpu = f"{p.cpu:.1f}%".rjust(6)
                 bullet = "• "
                 stat_col = stat
 
